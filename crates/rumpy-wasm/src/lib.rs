@@ -1065,6 +1065,26 @@ pub fn round_arr(arr: &NDArray) -> NDArray {
     NDArray::new(CpuBackend::round(&arr.inner))
 }
 
+#[wasm_bindgen(js_name = tanhArr)]
+pub fn tanh_arr(arr: &NDArray) -> NDArray {
+    NDArray::new(CpuBackend::tanh(&arr.inner))
+}
+
+#[wasm_bindgen(js_name = negArr)]
+pub fn neg_arr(arr: &NDArray) -> NDArray {
+    NDArray::new(CpuBackend::neg(&arr.inner))
+}
+
+#[wasm_bindgen(js_name = sinhArr)]
+pub fn sinh_arr(arr: &NDArray) -> NDArray {
+    NDArray::new(CpuBackend::sinh(&arr.inner))
+}
+
+#[wasm_bindgen(js_name = coshArr)]
+pub fn cosh_arr(arr: &NDArray) -> NDArray {
+    NDArray::new(CpuBackend::cosh(&arr.inner))
+}
+
 // ============ Linear algebra ============
 
 #[wasm_bindgen]
@@ -3452,6 +3472,100 @@ impl NDArray {
                 Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
             }
         }
+    }
+}
+
+/// Broadcast array to a new shape (like np.broadcast_to)
+///
+/// The array is broadcast to the target shape according to NumPy broadcasting rules.
+/// This creates a view (no copying) when possible, but always returns a contiguous array.
+///
+/// # Arguments
+/// * `shape` - Target shape to broadcast to
+#[wasm_bindgen]
+impl NDArray {
+    #[wasm_bindgen(js_name = broadcastTo)]
+    pub fn broadcast_to(&self, shape: Vec<usize>) -> Result<NDArray, JsValue> {
+        let data = self.inner.as_ndarray();
+        let src_shape = data.shape();
+
+        // Check if broadcasting is valid
+        if shape.len() < src_shape.len() {
+            return Err(JsValue::from_str("Cannot broadcast to smaller number of dimensions"));
+        }
+
+        // Pad source shape with 1s on the left to match target dims
+        let pad = shape.len() - src_shape.len();
+        let mut src_padded = vec![1usize; pad];
+        src_padded.extend(src_shape.iter().cloned());
+
+        // Validate broadcasting rules
+        for (i, (&src_dim, &tgt_dim)) in src_padded.iter().zip(shape.iter()).enumerate() {
+            if src_dim != 1 && src_dim != tgt_dim {
+                return Err(JsValue::from_str(&format!(
+                    "Cannot broadcast dimension {} from {} to {}",
+                    i, src_dim, tgt_dim
+                )));
+            }
+        }
+
+        // Use ndarray's broadcast_to
+        let target_shape = ndarray::IxDyn(&shape);
+        let broadcasted = data.broadcast(target_shape)
+            .ok_or_else(|| JsValue::from_str("Broadcast failed"))?;
+
+        // Convert to owned (contiguous) array
+        let result = broadcasted.to_owned();
+        Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+    }
+}
+
+/// Cast array to a different dtype (currently f32/f64)
+///
+/// Since rumpy internally uses f64, this mainly handles precision conversion.
+/// For ONNX compatibility, this will be extended to handle int8/int32/int64.
+#[wasm_bindgen]
+impl NDArray {
+    #[wasm_bindgen(js_name = asType)]
+    pub fn as_type(&self, dtype: &str) -> Result<NDArray, JsValue> {
+        // Currently all arrays are f64 internally
+        // This is a placeholder that validates dtype and returns a copy
+        match dtype {
+            "float64" | "f64" | "double" => {
+                // Already f64, return clone
+                Ok(NDArray::new(self.inner.clone()))
+            }
+            "float32" | "f32" | "float" => {
+                // Convert to f32 and back (simulates precision loss)
+                let data = self.inner.as_ndarray();
+                let result = data.mapv(|x| x as f32 as f64);
+                Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+            }
+            "int64" | "i64" | "long" => {
+                let data = self.inner.as_ndarray();
+                let result = data.mapv(|x| x.round());
+                Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+            }
+            "int32" | "i32" | "int" => {
+                let data = self.inner.as_ndarray();
+                let result = data.mapv(|x| (x.round() as i32) as f64);
+                Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+            }
+            _ => Err(JsValue::from_str(&format!("Unsupported dtype: {}", dtype)))
+        }
+    }
+}
+
+/// Dequantize int8 tensor: output = (input - zero_point) * scale
+///
+/// Essential for running quantized ONNX models from transformers.js
+#[wasm_bindgen]
+impl NDArray {
+    #[wasm_bindgen(js_name = dequantizeLinear)]
+    pub fn dequantize_linear(&self, scale: f64, zero_point: f64) -> NDArray {
+        let data = self.inner.as_ndarray();
+        let result = data.mapv(|x| (x - zero_point) * scale);
+        NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result))
     }
 }
 

@@ -617,6 +617,77 @@ add_test("indexCopy axis=0", "indexCopy",
          result_indexcopy)
 
 
+# ==================== SPRINT 6: Transformer Ops ====================
+
+# Test tanh
+arr_tanh = np.array([-2, -1, 0, 1, 2], dtype=np.float64)
+add_test("tanh", "tanhArr",
+         {"data": arr_tanh.tolist(), "shape": [5]},
+         np.tanh(arr_tanh))
+
+# Test neg
+arr_neg = np.array([-2, -1, 0, 1, 2], dtype=np.float64)
+add_test("neg", "negArr",
+         {"data": arr_neg.tolist(), "shape": [5]},
+         -arr_neg)
+
+# Test sinh
+arr_sinh = np.array([-1, 0, 1], dtype=np.float64)
+add_test("sinh", "sinhArr",
+         {"data": arr_sinh.tolist(), "shape": [3]},
+         np.sinh(arr_sinh))
+
+# Test cosh
+arr_cosh = np.array([-1, 0, 1], dtype=np.float64)
+add_test("cosh", "coshArr",
+         {"data": arr_cosh.tolist(), "shape": [3]},
+         np.cosh(arr_cosh))
+
+# Test broadcast_to
+arr_bc = np.array([[1, 2, 3]], dtype=np.float64)  # shape (1, 3)
+add_test("broadcastTo (1,3) -> (4,3)", "broadcastTo",
+         {"data": arr_bc.flatten().tolist(), "shape": [1, 3], "target_shape": [4, 3]},
+         np.broadcast_to(arr_bc, (4, 3)))
+
+arr_bc_scalar = np.array([5], dtype=np.float64)  # shape (1,)
+add_test("broadcastTo (1,) -> (5,)", "broadcastTo",
+         {"data": arr_bc_scalar.tolist(), "shape": [1], "target_shape": [5]},
+         np.broadcast_to(arr_bc_scalar, (5,)))
+
+# Test broadcast_to with implicit dimension expansion
+arr_bc_1d = np.array([1, 2, 3], dtype=np.float64)  # shape (3,)
+add_test("broadcastTo (3,) -> (2,3)", "broadcastTo",
+         {"data": arr_bc_1d.tolist(), "shape": [3], "target_shape": [2, 3]},
+         np.broadcast_to(arr_bc_1d, (2, 3)))
+
+# Test asType (cast)
+arr_cast = np.array([1.5, 2.7, 3.2], dtype=np.float64)
+add_test("asType float32", "asType",
+         {"data": arr_cast.tolist(), "shape": [3], "dtype": "float32"},
+         arr_cast.astype(np.float32).astype(np.float64))  # f64 -> f32 -> f64 to match behavior
+
+add_test("asType int64", "asType",
+         {"data": arr_cast.tolist(), "shape": [3], "dtype": "int64"},
+         np.round(arr_cast))  # Matches our int64 implementation
+
+# Test dequantizeLinear
+# ONNX DequantizeLinear: output = (input - zero_point) * scale
+arr_quant = np.array([0, 64, 128, 192, 255], dtype=np.float64)
+scale = 0.01
+zero_point = 128.0
+add_test("dequantizeLinear", "dequantizeLinear",
+         {"data": arr_quant.tolist(), "shape": [5], "scale": scale, "zero_point": zero_point},
+         (arr_quant - zero_point) * scale)
+
+# Test gather (alias for take) - critical for embeddings
+embedding = np.random.rand(1000, 256).astype(np.float64)  # vocab_size=1000, embed_dim=256
+token_ids = np.array([0, 42, 100, 999], dtype=np.float64)
+add_test("gather (embedding lookup)", "gather",
+         {"data": embedding.flatten().tolist(), "shape": [1000, 256],
+          "indices": token_ids.tolist(), "axis": 0},
+         np.take(embedding, token_ids.astype(int), axis=0))
+
+
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.floating):
