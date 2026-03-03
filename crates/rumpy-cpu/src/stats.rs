@@ -709,19 +709,31 @@ impl StatsOps for CpuBackend {
     }
 
     fn nanmin(arr: &CpuArray) -> f64 {
-        arr.as_ndarray()
+        // NumPy returns NaN for empty or all-NaN arrays
+        let filtered: Vec<f64> = arr.as_ndarray()
             .iter()
             .filter(|x| !x.is_nan())
             .cloned()
-            .fold(f64::INFINITY, f64::min)
+            .collect();
+        if filtered.is_empty() {
+            f64::NAN
+        } else {
+            filtered.into_iter().fold(f64::INFINITY, f64::min)
+        }
     }
 
     fn nanmax(arr: &CpuArray) -> f64 {
-        arr.as_ndarray()
+        // NumPy returns NaN for empty or all-NaN arrays
+        let filtered: Vec<f64> = arr.as_ndarray()
             .iter()
             .filter(|x| !x.is_nan())
             .cloned()
-            .fold(f64::NEG_INFINITY, f64::max)
+            .collect();
+        if filtered.is_empty() {
+            f64::NAN
+        } else {
+            filtered.into_iter().fold(f64::NEG_INFINITY, f64::max)
+        }
     }
 }
 
@@ -935,5 +947,21 @@ mod tests {
         let a = arr(vec![3.0, f64::NAN, 1.0, 5.0]);
         assert_eq!(CpuBackend::nanmin(&a), 1.0);
         assert_eq!(CpuBackend::nanmax(&a), 5.0);
+    }
+
+    #[test]
+    fn test_nanmin_all_nan() {
+        // NumPy returns NaN (with warning) for all-NaN arrays
+        let a = arr(vec![f64::NAN, f64::NAN, f64::NAN]);
+        assert!(CpuBackend::nanmin(&a).is_nan());
+        assert!(CpuBackend::nanmax(&a).is_nan());
+    }
+
+    #[test]
+    fn test_nanmin_empty() {
+        // NumPy returns NaN for empty arrays
+        let a = CpuArray::from_f64_vec(vec![], vec![0]).unwrap();
+        assert!(CpuBackend::nanmin(&a).is_nan());
+        assert!(CpuBackend::nanmax(&a).is_nan());
     }
 }

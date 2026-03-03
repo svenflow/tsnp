@@ -27,10 +27,10 @@ impl SortOps for CpuBackend {
 
         match axis {
             None => {
-                // Sort flattened array
+                // Sort flattened array - NumPy returns 1D array when axis=None
                 let mut data = arr.as_f64_slice();
                 data.sort_by(nan_safe_cmp);
-                Ok(CpuArray::from_ndarray(ArrayD::from_shape_vec(IxDyn(shape), data).unwrap()))
+                Ok(CpuArray::from_ndarray(ArrayD::from_shape_vec(IxDyn(&[data.len()]), data).unwrap()))
             }
             Some(ax) => {
                 if ax >= ndim {
@@ -306,6 +306,15 @@ mod tests {
             sorted.as_f64_slice(),
             vec![1.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 9.0]
         );
+    }
+
+    #[test]
+    fn test_sort_axis_none_returns_1d() {
+        // NumPy sort(axis=None) returns flattened 1D array, not original shape
+        let a = CpuArray::from_f64_vec(vec![3.0, 1.0, 4.0, 2.0], vec![2, 2]).unwrap();
+        let sorted = CpuBackend::sort(&a, None).unwrap();
+        assert_eq!(sorted.shape(), &[4]); // Should be 1D, not [2, 2]
+        assert_eq!(sorted.as_f64_slice(), vec![1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]

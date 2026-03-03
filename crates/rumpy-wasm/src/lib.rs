@@ -3856,17 +3856,33 @@ impl NDArray {
 
 // ============ Element-wise maximum/minimum ============
 
-/// NumPy-style maximum: returns non-NaN value when one is NaN, NaN when both are NaN
+/// NumPy np.maximum: propagates NaN (if either is NaN, result is NaN)
+/// Note: np.fmax ignores NaN and returns non-NaN value
 #[inline]
 fn np_maximum(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() { f64::NAN }
+    else { a.max(b) }
+}
+
+/// NumPy np.minimum: propagates NaN (if either is NaN, result is NaN)
+/// Note: np.fmin ignores NaN and returns non-NaN value
+#[inline]
+fn np_minimum(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() { f64::NAN }
+    else { a.min(b) }
+}
+
+/// NumPy np.fmax: ignores NaN (returns non-NaN value when one is NaN)
+#[inline]
+fn np_fmax(a: f64, b: f64) -> f64 {
     if a.is_nan() { b }
     else if b.is_nan() { a }
     else { a.max(b) }
 }
 
-/// NumPy-style minimum: returns non-NaN value when one is NaN, NaN when both are NaN
+/// NumPy np.fmin: ignores NaN (returns non-NaN value when one is NaN)
 #[inline]
-fn np_minimum(a: f64, b: f64) -> f64 {
+fn np_fmin(a: f64, b: f64) -> f64 {
     if a.is_nan() { b }
     else if b.is_nan() { a }
     else { a.min(b) }
@@ -3876,7 +3892,8 @@ fn np_minimum(a: f64, b: f64) -> f64 {
 ///
 /// Compares two arrays element-by-element and returns the maximum values.
 /// Equivalent to numpy.maximum(a, b).
-/// Supports broadcasting. NaN-aware: returns non-NaN when one value is NaN.
+/// Supports broadcasting. NaN propagates: if either value is NaN, result is NaN.
+/// For NaN-ignoring behavior, use fmax instead.
 #[wasm_bindgen]
 pub fn maximum(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
     let a_data = a.inner.as_ndarray();
@@ -3931,7 +3948,8 @@ pub fn maximum(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
 ///
 /// Compares two arrays element-by-element and returns the minimum values.
 /// Equivalent to numpy.minimum(a, b).
-/// Supports broadcasting. NaN-aware: returns non-NaN when one value is NaN.
+/// Supports broadcasting. NaN propagates: if either value is NaN, result is NaN.
+/// For NaN-ignoring behavior, use fmin instead.
 #[wasm_bindgen]
 pub fn minimum(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
     let a_data = a.inner.as_ndarray();
@@ -3977,7 +3995,7 @@ pub fn minimum(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
     }
 }
 
-/// Element-wise maximum with a scalar (NaN-aware)
+/// Element-wise maximum with a scalar (NaN propagates)
 #[wasm_bindgen(js_name = maximumScalar)]
 pub fn maximum_scalar(arr: &NDArray, scalar: f64) -> NDArray {
     let data = arr.inner.as_ndarray();
@@ -3985,11 +4003,125 @@ pub fn maximum_scalar(arr: &NDArray, scalar: f64) -> NDArray {
     NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result))
 }
 
-/// Element-wise minimum with a scalar (NaN-aware)
+/// Element-wise minimum with a scalar (NaN propagates)
 #[wasm_bindgen(js_name = minimumScalar)]
 pub fn minimum_scalar(arr: &NDArray, scalar: f64) -> NDArray {
     let data = arr.inner.as_ndarray();
     let result = data.mapv(|v| np_minimum(v, scalar));
+    NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result))
+}
+
+/// Element-wise fmax of two arrays (NaN-ignoring)
+///
+/// Like maximum, but ignores NaN values - returns non-NaN when one is NaN.
+/// Equivalent to numpy.fmax(a, b).
+#[wasm_bindgen]
+pub fn fmax(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
+    let a_data = a.inner.as_ndarray();
+    let b_data = b.inner.as_ndarray();
+
+    let a_shape = a_data.shape();
+    let b_shape = b_data.shape();
+
+    if a_shape == b_shape {
+        let result = ndarray::Zip::from(&*a_data)
+            .and(&*b_data)
+            .map_collect(|&av, &bv| np_fmax(av, bv));
+        Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+    } else if a_data.len() == 1 {
+        let scalar = *a_data.iter().next().unwrap();
+        let result = b_data.mapv(|v| np_fmax(v, scalar));
+        Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+    } else if b_data.len() == 1 {
+        let scalar = *b_data.iter().next().unwrap();
+        let result = a_data.mapv(|v| np_fmax(v, scalar));
+        Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+    } else {
+        let b_dim = ndarray::IxDyn(b_shape);
+        if let Some(a_broadcast) = a_data.broadcast(b_dim.clone()) {
+            let result = ndarray::Zip::from(&a_broadcast)
+                .and(&*b_data)
+                .map_collect(|&av, &bv| np_fmax(av, bv));
+            return Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)));
+        }
+
+        let a_dim = ndarray::IxDyn(a_shape);
+        if let Some(b_broadcast) = b_data.broadcast(a_dim) {
+            let result = ndarray::Zip::from(&*a_data)
+                .and(&b_broadcast)
+                .map_collect(|&av, &bv| np_fmax(av, bv));
+            return Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)));
+        }
+
+        Err(JsValue::from_str(&format!(
+            "shapes {:?} and {:?} are not broadcastable",
+            a_shape, b_shape
+        )))
+    }
+}
+
+/// Element-wise fmin of two arrays (NaN-ignoring)
+///
+/// Like minimum, but ignores NaN values - returns non-NaN when one is NaN.
+/// Equivalent to numpy.fmin(a, b).
+#[wasm_bindgen]
+pub fn fmin(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
+    let a_data = a.inner.as_ndarray();
+    let b_data = b.inner.as_ndarray();
+
+    let a_shape = a_data.shape();
+    let b_shape = b_data.shape();
+
+    if a_shape == b_shape {
+        let result = ndarray::Zip::from(&*a_data)
+            .and(&*b_data)
+            .map_collect(|&av, &bv| np_fmin(av, bv));
+        Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+    } else if a_data.len() == 1 {
+        let scalar = *a_data.iter().next().unwrap();
+        let result = b_data.mapv(|v| np_fmin(v, scalar));
+        Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+    } else if b_data.len() == 1 {
+        let scalar = *b_data.iter().next().unwrap();
+        let result = a_data.mapv(|v| np_fmin(v, scalar));
+        Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+    } else {
+        let b_dim = ndarray::IxDyn(b_shape);
+        if let Some(a_broadcast) = a_data.broadcast(b_dim.clone()) {
+            let result = ndarray::Zip::from(&a_broadcast)
+                .and(&*b_data)
+                .map_collect(|&av, &bv| np_fmin(av, bv));
+            return Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)));
+        }
+
+        let a_dim = ndarray::IxDyn(a_shape);
+        if let Some(b_broadcast) = b_data.broadcast(a_dim) {
+            let result = ndarray::Zip::from(&*a_data)
+                .and(&b_broadcast)
+                .map_collect(|&av, &bv| np_fmin(av, bv));
+            return Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)));
+        }
+
+        Err(JsValue::from_str(&format!(
+            "shapes {:?} and {:?} are not broadcastable",
+            a_shape, b_shape
+        )))
+    }
+}
+
+/// Element-wise fmax with a scalar (NaN-ignoring)
+#[wasm_bindgen(js_name = fmaxScalar)]
+pub fn fmax_scalar(arr: &NDArray, scalar: f64) -> NDArray {
+    let data = arr.inner.as_ndarray();
+    let result = data.mapv(|v| np_fmax(v, scalar));
+    NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result))
+}
+
+/// Element-wise fmin with a scalar (NaN-ignoring)
+#[wasm_bindgen(js_name = fminScalar)]
+pub fn fmin_scalar(arr: &NDArray, scalar: f64) -> NDArray {
+    let data = arr.inner.as_ndarray();
+    let result = data.mapv(|v| np_fmin(v, scalar));
     NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result))
 }
 
@@ -4038,6 +4170,77 @@ pub fn expm1_arr(arr: &NDArray) -> NDArray {
     let data = arr.inner.as_ndarray();
     let result = data.mapv(|v| v.exp_m1());
     NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result))
+}
+
+/// Element-wise log(exp(x1) + exp(x2)) computed in a numerically stable way.
+///
+/// Equivalent to numpy.logaddexp(x1, x2).
+/// Useful for log-space probability computations.
+#[wasm_bindgen(js_name = logaddexpArr)]
+pub fn logaddexp_arr(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
+    let a_data = a.inner.as_ndarray();
+    let b_data = b.inner.as_ndarray();
+
+    if a_data.shape() != b_data.shape() {
+        return Err(JsValue::from_str(&format!(
+            "shapes {:?} and {:?} must match for logaddexp",
+            a_data.shape(), b_data.shape()
+        )));
+    }
+
+    // Numerically stable: log(exp(a) + exp(b)) = max(a,b) + log(1 + exp(-|a-b|))
+    let result = ndarray::Zip::from(&*a_data)
+        .and(&*b_data)
+        .map_collect(|&av, &bv| {
+            if av.is_nan() || bv.is_nan() {
+                f64::NAN
+            } else if av == f64::NEG_INFINITY {
+                bv
+            } else if bv == f64::NEG_INFINITY {
+                av
+            } else {
+                let max_val = av.max(bv);
+                let min_val = av.min(bv);
+                max_val + (1.0 + (min_val - max_val).exp()).ln()
+            }
+        });
+    Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+}
+
+/// Element-wise log2(2^x1 + 2^x2) computed in a numerically stable way.
+///
+/// Equivalent to numpy.logaddexp2(x1, x2).
+/// Useful for log2-space probability computations.
+#[wasm_bindgen(js_name = logaddexp2Arr)]
+pub fn logaddexp2_arr(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
+    let a_data = a.inner.as_ndarray();
+    let b_data = b.inner.as_ndarray();
+
+    if a_data.shape() != b_data.shape() {
+        return Err(JsValue::from_str(&format!(
+            "shapes {:?} and {:?} must match for logaddexp2",
+            a_data.shape(), b_data.shape()
+        )));
+    }
+
+    let ln2 = std::f64::consts::LN_2;
+    // log2(2^a + 2^b) = max(a,b) + log2(1 + 2^(min-max))
+    let result = ndarray::Zip::from(&*a_data)
+        .and(&*b_data)
+        .map_collect(|&av, &bv| {
+            if av.is_nan() || bv.is_nan() {
+                f64::NAN
+            } else if av == f64::NEG_INFINITY {
+                bv
+            } else if bv == f64::NEG_INFINITY {
+                av
+            } else {
+                let max_val = av.max(bv);
+                let min_val = av.min(bv);
+                max_val + (1.0 + ((min_val - max_val) * ln2).exp()).ln() / ln2
+            }
+        });
+    Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
 }
 
 /// Element-wise sign function

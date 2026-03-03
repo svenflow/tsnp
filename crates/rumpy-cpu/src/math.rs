@@ -60,7 +60,25 @@ impl MathOps for CpuBackend {
     // Rounding
     impl_unary_op!(floor, |x: f64| x.floor());
     impl_unary_op!(ceil, |x: f64| x.ceil());
-    impl_unary_op!(round, |x: f64| x.round());
+    // NumPy uses round-half-to-even (banker's rounding) by default for .round()
+    // but with 0 decimals np.round uses round-half-away-from-zero for consistency
+    // with Python's round(). We match NumPy behavior here.
+    fn round(arr: &CpuArray) -> CpuArray {
+        CpuArray::from_ndarray(arr.as_ndarray().mapv(|x| {
+            // Round half away from zero (NumPy behavior)
+            if x.is_nan() {
+                f64::NAN
+            } else {
+                let frac = x.fract().abs();
+                if (frac - 0.5).abs() < 1e-15 {
+                    // Exactly 0.5: round away from zero
+                    if x > 0.0 { x.ceil() } else { x.floor() }
+                } else {
+                    x.round()
+                }
+            }
+        }))
+    }
 
     // Other unary
     impl_unary_op!(abs, |x: f64| x.abs());
@@ -93,20 +111,20 @@ impl MathOps for CpuBackend {
     }
 
     fn maximum(a: &CpuArray, b: &CpuArray) -> Result<CpuArray> {
-        // NumPy behavior: if one value is NaN, return the non-NaN value
+        // NumPy np.maximum behavior: propagate NaN (if either is NaN, result is NaN)
+        // Note: np.fmax ignores NaN and returns non-NaN value
         let result = broadcast_binary_op(a.as_ndarray(), b.as_ndarray(), |x, y| {
-            if x.is_nan() { y }
-            else if y.is_nan() { x }
+            if x.is_nan() || y.is_nan() { f64::NAN }
             else { x.max(y) }
         })?;
         Ok(CpuArray::from_ndarray(result))
     }
 
     fn minimum(a: &CpuArray, b: &CpuArray) -> Result<CpuArray> {
-        // NumPy behavior: if one value is NaN, return the non-NaN value
+        // NumPy np.minimum behavior: propagate NaN (if either is NaN, result is NaN)
+        // Note: np.fmin ignores NaN and returns non-NaN value
         let result = broadcast_binary_op(a.as_ndarray(), b.as_ndarray(), |x, y| {
-            if x.is_nan() { y }
-            else if y.is_nan() { x }
+            if x.is_nan() || y.is_nan() { f64::NAN }
             else { x.min(y) }
         })?;
         Ok(CpuArray::from_ndarray(result))
@@ -255,11 +273,44 @@ mod tests {
     }
 
     #[test]
+    fn test_maximum_nan_propagates() {
+        // NumPy np.maximum propagates NaN - if either is NaN, result is NaN
+        let a = arr(vec![1.0, f64::NAN, 3.0]);
+        let b = arr(vec![2.0, 5.0, f64::NAN]);
+        let result = CpuBackend::maximum(&a, &b).unwrap();
+        let data = result.as_f64_slice();
+        assert_eq!(data[0], 2.0);
+        assert!(data[1].is_nan()); // NaN propagates
+        assert!(data[2].is_nan()); // NaN propagates
+    }
+
+    #[test]
     fn test_minimum() {
         let a = arr(vec![1.0, 5.0, 3.0]);
         let b = arr(vec![2.0, 3.0, 4.0]);
         let result = CpuBackend::minimum(&a, &b).unwrap();
         assert_eq!(result.as_f64_slice(), vec![1.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn test_minimum_nan_propagates() {
+        // NumPy np.minimum propagates NaN - if either is NaN, result is NaN
+        let a = arr(vec![1.0, f64::NAN, 3.0]);
+        let b = arr(vec![2.0, 5.0, f64::NAN]);
+        let result = CpuBackend::minimum(&a, &b).unwrap();
+        let data = result.as_f64_slice();
+        assert_eq!(data[0], 1.0);
+        assert!(data[1].is_nan()); // NaN propagates
+        assert!(data[2].is_nan()); // NaN propagates
+    }
+
+    #[test]
+    fn test_round_half_away_from_zero() {
+        // NumPy rounds 0.5 away from zero, not banker's rounding
+        let a = arr(vec![0.5, 1.5, 2.5, -0.5, -1.5, -2.5]);
+        let result = CpuBackend::round(&a);
+        // 0.5 -> 1, 1.5 -> 2, 2.5 -> 3, -0.5 -> -1, -1.5 -> -2, -2.5 -> -3
+        assert_eq!(result.as_f64_slice(), vec![1.0, 2.0, 3.0, -1.0, -2.0, -3.0]);
     }
 
     #[test]

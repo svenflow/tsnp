@@ -103,6 +103,15 @@ impl RandomOps for CpuBackend {
         let data = arr.as_f64_slice();
         let n = data.len();
 
+        // NumPy raises ValueError when size > n and replace=False
+        // We panic here (which becomes a JS error in WASM)
+        if !replace && size > n {
+            panic!(
+                "Cannot take a larger sample ({}) than population ({}) when replace=False",
+                size, n
+            );
+        }
+
         let values: Vec<f64> = RNG.with(|rng| {
             let mut rng = rng.borrow_mut();
 
@@ -111,17 +120,16 @@ impl RandomOps for CpuBackend {
             } else {
                 // Without replacement using Fisher-Yates partial shuffle - O(size) instead of O(n)
                 // Only shuffle the first `size` elements we need
-                let k = size.min(n);
                 let mut indices: Vec<usize> = (0..n).collect();
 
-                for i in 0..k {
+                for i in 0..size {
                     // Swap element at i with a random element from [i, n)
                     let j = rng.random_range(i..n);
                     indices.swap(i, j);
                 }
 
-                // Take the first k elements
-                indices[..k].iter().map(|&i| data[i]).collect()
+                // Take the first size elements
+                indices[..size].iter().map(|&i| data[i]).collect()
             }
         });
 
