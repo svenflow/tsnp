@@ -185,30 +185,51 @@ const UNARY_SHADERS: Record<string, string> = {
   // cbrt and log10 need special handling (not in WGSL)
   cbrt: makeUnaryShader('sign(x) * pow(abs(x), 0.333333333333)'),
   log10: makeUnaryShader('log(x) / 2.302585093'),  // log10(e) = 1/ln(10)
-  // Extended unary ops
+  // Extended unary ops - all use GPU shaders
   // asinh(x) = ln(x + sqrt(x^2 + 1))
   asinh: makeUnaryShader('sign(x) * log(abs(x) + sqrt(x * x + 1.0))'),
-  // acosh(x) = ln(x + sqrt(x^2 - 1)), x >= 1
-  acosh: makeUnaryShader('log(x + sqrt(x * x - 1.0))'),
-  // atanh(x) = 0.5 * ln((1 + x) / (1 - x)), |x| < 1
+  // acosh(x) = ln(x + sqrt(x^2 - 1)), x >= 1; returns NaN for x < 1
+  acosh: makeUnaryShader('select(log(x + sqrt(x * x - 1.0)), 0.0 / 0.0, x < 1.0)'),
+  // atanh(x) = 0.5 * ln((1 + x) / (1 - x)), |x| < 1; returns NaN/Inf for |x| >= 1
   atanh: makeUnaryShader('0.5 * log((1.0 + x) / (1.0 - x))'),
   // expm1(x) = exp(x) - 1, numerically stable for small x
-  expm1: makeUnaryShader('exp(x) - 1.0'),
+  // For |x| < 0.01, use Taylor series: x + x^2/2 + x^3/6 + x^4/24
+  // For larger x, use exp(x) - 1 directly
+  expm1: makeUnaryShader(`
+    select(
+      exp(x) - 1.0,
+      x * (1.0 + x * (0.5 + x * (0.16666666666666666 + x * 0.041666666666666664))),
+      abs(x) < 0.01
+    )
+  `),
   // log1p(x) = log(1 + x), numerically stable for small x
-  log1p: makeUnaryShader('log(1.0 + x)'),
+  // For |x| < 0.01, use Taylor series: x - x^2/2 + x^3/3 - x^4/4
+  // For larger x, use log(1 + x) directly
+  log1p: makeUnaryShader(`
+    select(
+      log(1.0 + x),
+      x * (1.0 - x * (0.5 - x * (0.3333333333333333 - x * 0.25))),
+      abs(x) < 0.01
+    )
+  `),
   // trunc(x) = round toward zero
   trunc: makeUnaryShader('trunc(x)'),
-  // fix is alias for trunc
-  fix: makeUnaryShader('trunc(x)'),
   // sinc(x) = sin(pi*x)/(pi*x), sinc(0) = 1
-  sinc: makeUnaryShader('select(sin(3.14159265359 * x) / (3.14159265359 * x), 1.0, x == 0.0)'),
+  sinc: makeUnaryShader('select(sin(3.14159265358979 * x) / (3.14159265358979 * x), 1.0, abs(x) < 0.0000001)'),
   // deg2rad
   deg2rad: makeUnaryShader('x * 0.01745329251994329577'),  // pi/180
   // rad2deg
   rad2deg: makeUnaryShader('x * 57.29577951308232087680'),  // 180/pi
   // signbit: 1.0 if negative (including -0), 0.0 otherwise
-  // Use 1/x < 0 trick to detect -0
-  signbit: makeUnaryShader('select(0.0, 1.0, x < 0.0 || (x == 0.0 && 1.0 / x < 0.0))'),
+  // NumPy: signbit(NaN) = False (0), signbit(-0) = True (1), signbit(-inf) = True (1)
+  // Use bitcast to detect sign bit directly - IEEE 754 f32 sign is bit 31
+  signbit: makeUnaryShader(`
+    select(
+      f32(bitcast<u32>(x) >> 31u),
+      0.0,
+      x != x
+    )
+  `),
 };
 
 // Binary shader definitions
@@ -234,6 +255,86 @@ const BINARY_SHADERS: Record<string, string> = {
   // Use av != av to check for NaN (NaN != NaN is true)
   maximum: makeBinaryShader('select(max(av, bv), av + bv, av != av || bv != bv)'),  // NaN + anything = NaN
   minimum: makeBinaryShader('select(min(av, bv), av + bv, av != av || bv != bv)'),
+  // fmod: C-style modulo (result has same sign as dividend)
+  // WGSL % operator does exactly this
+  fmod: makeBinaryShader('av - trunc(av / bv) * bv'),
+  // mod: Python-style modulo (result has same sign as divisor)
+  // r = av % bv; if r != 0 and sign(r) != sign(bv), then r + bv, else r
+  mod: makeBinaryShader(`
+    select(
+      av - trunc(av / bv) * bv + bv,
+      av - trunc(av / bv) * bv,
+      (av - trunc(av / bv) * bv) * bv >= 0.0 || (av - trunc(av / bv) * bv) == 0.0
+    )
+  `),
+  // copysign: copy sign of bv to magnitude of av
+  // Use bitcast to properly handle -0
+  copysign: makeBinaryShader(`
+    bitcast<f32>((bitcast<u32>(abs(av)) & 0x7FFFFFFFu) | (bitcast<u32>(bv) & 0x80000000u))
+  `),
+  // hypot: sqrt(a^2 + b^2), avoid overflow for large values
+  hypot: makeBinaryShader(`
+    select(
+      select(
+        abs(av) * sqrt(1.0 + (bv / av) * (bv / av)),
+        abs(bv) * sqrt(1.0 + (av / bv) * (av / bv)),
+        abs(av) > abs(bv)
+      ),
+      0.0,
+      av == 0.0 && bv == 0.0
+    )
+  `),
+  // arctan2: angle of point (bv, av) - note: atan2(y, x) so y=av, x=bv
+  arctan2: makeBinaryShader('atan2(av, bv)'),
+  // logaddexp: log(exp(a) + exp(b)), numerically stable
+  logaddexp: makeBinaryShader(`
+    select(
+      select(
+        av + log(1.0 + exp(bv - av)),
+        bv + log(1.0 + exp(av - bv)),
+        av > bv
+      ),
+      -1.0 / 0.0,
+      av == -1.0 / 0.0 && bv == -1.0 / 0.0
+    )
+  `),
+  // logaddexp2: log2(2^a + 2^b), numerically stable
+  logaddexp2: makeBinaryShader(`
+    select(
+      select(
+        av + log2(1.0 + exp2(bv - av)),
+        bv + log2(1.0 + exp2(av - bv)),
+        av > bv
+      ),
+      -1.0 / 0.0,
+      av == -1.0 / 0.0 && bv == -1.0 / 0.0
+    )
+  `),
+  // fmax: maximum ignoring NaN (if one is NaN, return the other)
+  // Only return NaN if both are NaN
+  fmax: makeBinaryShader(`
+    select(
+      select(
+        max(av, bv),
+        av,
+        bv != bv
+      ),
+      bv,
+      av != av
+    )
+  `),
+  // fmin: minimum ignoring NaN (if one is NaN, return the other)
+  fmin: makeBinaryShader(`
+    select(
+      select(
+        min(av, bv),
+        av,
+        bv != bv
+      ),
+      bv,
+      av != av
+    )
+  `),
 };
 
 // Scalar shader definitions
@@ -254,6 +355,10 @@ const SCALAR_SHADERS: Record<string, string> = {
       x < 0.0 && fract(s) == 0.0
     )
   `),
+  // heaviside: 0 if x < 0, s if x == 0, 1 if x > 0
+  heaviside: makeScalarShader('select(select(1.0, s, x == 0.0), 0.0, x < 0.0)'),
+  // ldexp: x * 2^s (scalar exponent)
+  ldexp: makeScalarShader('x * exp2(s)'),
 };
 
 // Reduction shader definitions
@@ -301,6 +406,78 @@ const CUMPROD_SHADER = `
       prod = prod * input[i];
     }
     output[idx] = prod;
+  }
+`;
+
+// ============ Decomposition Shaders ============
+
+// modf: split into fractional and integer parts
+const MODF_SHADER = `
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> frac: array<f32>;
+  @group(0) @binding(2) var<storage, read_write> integ: array<f32>;
+  @group(0) @binding(3) var<uniform> size: u32;
+
+  @compute @workgroup_size(256)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= size) { return; }
+    let x = input[idx];
+    let i = trunc(x);
+    integ[idx] = i;
+    frac[idx] = x - i;
+  }
+`;
+
+// frexp: split into mantissa and exponent
+// x = mantissa * 2^exponent, where 0.5 <= |mantissa| < 1
+const FREXP_SHADER = `
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> mantissa: array<f32>;
+  @group(0) @binding(2) var<storage, read_write> exponent: array<f32>;
+  @group(0) @binding(3) var<uniform> size: u32;
+
+  @compute @workgroup_size(256)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= size) { return; }
+    let x = input[idx];
+
+    // Handle special cases
+    if (x == 0.0 || x != x || abs(x) == 1.0 / 0.0) {
+      mantissa[idx] = x;
+      exponent[idx] = 0.0;
+    } else {
+      // exp = floor(log2(|x|)) + 1
+      let e = floor(log2(abs(x))) + 1.0;
+      mantissa[idx] = x / exp2(e);
+      exponent[idx] = e;
+    }
+  }
+`;
+
+// divmod: compute both quotient and remainder (Python-style)
+const DIVMOD_SHADER = `
+  @group(0) @binding(0) var<storage, read> a: array<f32>;
+  @group(0) @binding(1) var<storage, read> b: array<f32>;
+  @group(0) @binding(2) var<storage, read_write> quotient: array<f32>;
+  @group(0) @binding(3) var<storage, read_write> remainder: array<f32>;
+  @group(0) @binding(4) var<uniform> size: u32;
+
+  @compute @workgroup_size(256)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= size) { return; }
+    let av = a[idx];
+    let bv = b[idx];
+
+    // Python-style floor division
+    quotient[idx] = floor(av / bv);
+
+    // Python-style modulo: result has same sign as divisor
+    let r = av - trunc(av / bv) * bv;
+    // Adjust if r and bv have different signs and r != 0
+    remainder[idx] = select(r + bv, r, r * bv >= 0.0 || r == 0.0);
   }
 `;
 
@@ -3741,6 +3918,288 @@ export class WebGPUBackend implements Backend {
     return this.createArray(f64Output, arr.shape);
   }
 
+  // ============ Decomposition GPU ops ============
+
+  private async runModf(arr: IFaceNDArray): Promise<{ frac: IFaceNDArray; integ: IFaceNDArray }> {
+    const pipeline = this.getOrCreatePipeline('modf', MODF_SHADER);
+    const n = arr.data.length;
+
+    // Create buffers
+    const inputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const fracBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const integBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Upload data
+    const f32Input = new Float32Array(n);
+    for (let i = 0; i < n; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    // Bind and dispatch
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: fracBuffer } },
+        { binding: 2, resource: { buffer: integBuffer } },
+        { binding: 3, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(n / 256));
+    passEncoder.end();
+
+    // Read back both buffers
+    const readFrac = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const readInteg = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(fracBuffer, 0, readFrac, 0, n * 4);
+    commandEncoder.copyBufferToBuffer(integBuffer, 0, readInteg, 0, n * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readFrac.mapAsync(GPUMapMode.READ);
+    const f32Frac = new Float32Array(readFrac.getMappedRange().slice(0));
+    readFrac.unmap();
+
+    await readInteg.mapAsync(GPUMapMode.READ);
+    const f32Integ = new Float32Array(readInteg.getMappedRange().slice(0));
+    readInteg.unmap();
+
+    // f32 -> f64
+    const f64Frac = new Float64Array(n);
+    const f64Integ = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      f64Frac[i] = f32Frac[i];
+      f64Integ[i] = f32Integ[i];
+    }
+
+    // Cleanup
+    inputBuffer.destroy();
+    fracBuffer.destroy();
+    integBuffer.destroy();
+    sizeBuffer.destroy();
+    readFrac.destroy();
+    readInteg.destroy();
+
+    return {
+      frac: this.createArray(f64Frac, arr.shape),
+      integ: this.createArray(f64Integ, arr.shape),
+    };
+  }
+
+  private async runFrexp(arr: IFaceNDArray): Promise<{ mantissa: IFaceNDArray; exponent: IFaceNDArray }> {
+    const pipeline = this.getOrCreatePipeline('frexp', FREXP_SHADER);
+    const n = arr.data.length;
+
+    // Create buffers
+    const inputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const mantissaBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const exponentBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Upload data
+    const f32Input = new Float32Array(n);
+    for (let i = 0; i < n; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    // Bind and dispatch
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: mantissaBuffer } },
+        { binding: 2, resource: { buffer: exponentBuffer } },
+        { binding: 3, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(n / 256));
+    passEncoder.end();
+
+    // Read back both buffers
+    const readMantissa = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const readExponent = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(mantissaBuffer, 0, readMantissa, 0, n * 4);
+    commandEncoder.copyBufferToBuffer(exponentBuffer, 0, readExponent, 0, n * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readMantissa.mapAsync(GPUMapMode.READ);
+    const f32Mantissa = new Float32Array(readMantissa.getMappedRange().slice(0));
+    readMantissa.unmap();
+
+    await readExponent.mapAsync(GPUMapMode.READ);
+    const f32Exponent = new Float32Array(readExponent.getMappedRange().slice(0));
+    readExponent.unmap();
+
+    // f32 -> f64
+    const f64Mantissa = new Float64Array(n);
+    const f64Exponent = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      f64Mantissa[i] = f32Mantissa[i];
+      f64Exponent[i] = f32Exponent[i];
+    }
+
+    // Cleanup
+    inputBuffer.destroy();
+    mantissaBuffer.destroy();
+    exponentBuffer.destroy();
+    sizeBuffer.destroy();
+    readMantissa.destroy();
+    readExponent.destroy();
+
+    return {
+      mantissa: this.createArray(f64Mantissa, arr.shape),
+      exponent: this.createArray(f64Exponent, arr.shape),
+    };
+  }
+
+  private async runDivmod(a: IFaceNDArray, b: IFaceNDArray): Promise<{ quotient: IFaceNDArray; remainder: IFaceNDArray }> {
+    if (a.data.length !== b.data.length) throw new Error('Shape mismatch');
+
+    const pipeline = this.getOrCreatePipeline('divmod', DIVMOD_SHADER);
+    const n = a.data.length;
+
+    // Create buffers
+    const aBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const bBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const quotientBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const remainderBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Upload data
+    const f32A = new Float32Array(n);
+    const f32B = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      f32A[i] = a.data[i];
+      f32B[i] = b.data[i];
+    }
+    this.device.queue.writeBuffer(aBuffer, 0, f32A);
+    this.device.queue.writeBuffer(bBuffer, 0, f32B);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    // Bind and dispatch
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: aBuffer } },
+        { binding: 1, resource: { buffer: bBuffer } },
+        { binding: 2, resource: { buffer: quotientBuffer } },
+        { binding: 3, resource: { buffer: remainderBuffer } },
+        { binding: 4, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(n / 256));
+    passEncoder.end();
+
+    // Read back both buffers
+    const readQuotient = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const readRemainder = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(quotientBuffer, 0, readQuotient, 0, n * 4);
+    commandEncoder.copyBufferToBuffer(remainderBuffer, 0, readRemainder, 0, n * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readQuotient.mapAsync(GPUMapMode.READ);
+    const f32Quotient = new Float32Array(readQuotient.getMappedRange().slice(0));
+    readQuotient.unmap();
+
+    await readRemainder.mapAsync(GPUMapMode.READ);
+    const f32Remainder = new Float32Array(readRemainder.getMappedRange().slice(0));
+    readRemainder.unmap();
+
+    // f32 -> f64
+    const f64Quotient = new Float64Array(n);
+    const f64Remainder = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      f64Quotient[i] = f32Quotient[i];
+      f64Remainder[i] = f32Remainder[i];
+    }
+
+    // Cleanup
+    aBuffer.destroy();
+    bBuffer.destroy();
+    quotientBuffer.destroy();
+    remainderBuffer.destroy();
+    sizeBuffer.destroy();
+    readQuotient.destroy();
+    readRemainder.destroy();
+
+    return {
+      quotient: this.createArray(f64Quotient, a.shape),
+      remainder: this.createArray(f64Remainder, a.shape),
+    };
+  }
+
   private async runReduction(arr: IFaceNDArray, opName: string): Promise<number> {
     const shader = REDUCTION_SHADERS[opName];
     if (!shader) throw new Error(`Unknown reduction op: ${opName}`);
@@ -4836,11 +5295,14 @@ export class WebGPUBackend implements Backend {
   }
 
   signbit(arr: IFaceNDArray): IFaceNDArray {
+    // Returns 1.0 if sign bit is set (negative or -0), 0.0 otherwise
+    // NumPy: signbit(NaN) = False, signbit(-0) = True, signbit(-inf) = True
     const result = new Float64Array(arr.data.length);
     for (let i = 0; i < arr.data.length; i++) {
       const x = arr.data[i];
-      if (Number.isNaN(x)) result[i] = Object.is(x, -0) || (1 / x < 0) ? 1 : 0;
-      else result[i] = x < 0 || Object.is(x, -0) ? 1 : 0;
+      if (Number.isNaN(x)) result[i] = 0;  // NumPy returns False for NaN
+      else if (Object.is(x, -0)) result[i] = 1;  // -0 has sign bit set
+      else result[i] = x < 0 ? 1 : 0;
     }
     return this.createArray(result, arr.shape);
   }
@@ -4985,10 +5447,15 @@ export class WebGPUBackend implements Backend {
   }
 
   copysign(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
+    // Copy sign of b to magnitude of a
+    // NumPy: copysign(5, -0) = -5, copysign(5, +0) = 5
     if (a.data.length !== b.data.length) throw new Error('Shape mismatch');
     const result = new Float64Array(a.data.length);
     for (let i = 0; i < a.data.length; i++) {
-      result[i] = Math.abs(a.data[i]) * Math.sign(b.data[i]);
+      const magnitude = Math.abs(a.data[i]);
+      // Use Object.is to detect -0, since Math.sign(0) = 0 and Math.sign(-0) = -0
+      const bNegative = b.data[i] < 0 || Object.is(b.data[i], -0);
+      result[i] = bNegative ? -magnitude : magnitude;
     }
     return this.createArray(result, a.shape);
   }
@@ -7015,6 +7482,20 @@ export class WebGPUBackend implements Backend {
   async reciprocalAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'reciprocal'); }
   async squareAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'square'); }
 
+  // Extended unary ops (GPU-accelerated)
+  async arcsinhAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'asinh'); }
+  async arccoshAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'acosh'); }
+  async arctanhAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'atanh'); }
+  async expm1Async(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'expm1'); }
+  async log1pAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'log1p'); }
+  async truncAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'trunc'); }
+  async fixAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'trunc'); }  // alias for trunc
+  async sincAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'sinc'); }
+  async deg2radAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'deg2rad'); }
+  async rad2degAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'rad2deg'); }
+  async signbitAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'signbit'); }
+  async heavisideAsync(arr: IFaceNDArray, h0: number): Promise<IFaceNDArray> { return this.runScalarOp(arr, h0, 'heaviside'); }
+
   // Binary ops (GPU-accelerated)
   async addAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'add'); }
   async subAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'sub'); }
@@ -7023,6 +7504,31 @@ export class WebGPUBackend implements Backend {
   async powAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'pow'); }
   async maximumAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'maximum'); }
   async minimumAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'minimum'); }
+
+  // Extended binary ops (GPU-accelerated)
+  async modAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'mod'); }
+  async fmodAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'fmod'); }
+  async remainderAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'mod'); }  // Same as mod
+  async copysignAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'copysign'); }
+  async hypotAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'hypot'); }
+  async arctan2Async(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'arctan2'); }
+  async logaddexpAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'logaddexp'); }
+  async logaddexp2Async(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'logaddexp2'); }
+  async fmaxAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'fmax'); }
+  async fminAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'fmin'); }
+
+  // Decomposition ops (GPU-accelerated)
+  async modfAsync(arr: IFaceNDArray): Promise<{ frac: IFaceNDArray; integ: IFaceNDArray }> { return this.runModf(arr); }
+  async frexpAsync(arr: IFaceNDArray): Promise<{ mantissa: IFaceNDArray; exponent: IFaceNDArray }> { return this.runFrexp(arr); }
+  async ldexpAsync(arr: IFaceNDArray, exp: IFaceNDArray): Promise<IFaceNDArray> {
+    // ldexp(mantissa, exp) = mantissa * 2^exp
+    // We need a binary shader for this, but we can use scalar op with exp2
+    // Since exp is an array, we need to use a binary operation approach
+    // Create a temp array with exp2(exp) and multiply
+    const exp2Result = await this.runUnaryOp(exp, 'exp2');
+    return this.runBinaryOp(arr, exp2Result, 'mul');
+  }
+  async divmodAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<{ quotient: IFaceNDArray; remainder: IFaceNDArray }> { return this.runDivmod(a, b); }
 
   // Scalar ops (GPU-accelerated)
   async addScalarAsync(arr: IFaceNDArray, scalar: number): Promise<IFaceNDArray> { return this.runScalarOp(arr, scalar, 'addScalar'); }

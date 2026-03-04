@@ -480,6 +480,18 @@ export function mathTests(getBackend: () => Backend) {
         expect(data[3]).toBe(0.0);  // positive
         expect(data[4]).toBe(0.0);  // positive
       });
+
+      it('computes signbit with NaN', () => {
+        const a = arr([NaN]);
+        const result = B.signbit(a);
+        expect(result.toArray()[0]).toBe(0.0);  // signbit(NaN) = 0 (NumPy: False)
+      });
+
+      it('computes signbit with negative zero', () => {
+        const a = arr([-0.0]);
+        const result = B.signbit(a);
+        expect(result.toArray()[0]).toBe(1.0);  // signbit(-0) = 1 (NumPy: True)
+      });
     });
 
     // ============ Decomposition Operations ============
@@ -620,6 +632,20 @@ export function mathTests(getBackend: () => Backend) {
         expect(data[4]).toBe(-0.0);  // |0| * sign(-1) = -0
       });
 
+      it('computes copysign with signed zeros', () => {
+        // copysign(5, -0) should return -5 (copy sign bit from -0)
+        const a1 = arr([5.0]);
+        const b1 = arr([-0.0]);
+        const result1 = B.copysign(a1, b1);
+        expect(result1.toArray()[0]).toBe(-5.0);
+
+        // copysign(-5, 0) should return 5 (copy sign bit from +0)
+        const a2 = arr([-5.0]);
+        const b2 = arr([0.0]);
+        const result2 = B.copysign(a2, b2);
+        expect(result2.toArray()[0]).toBe(5.0);
+      });
+
       it('computes hypot', () => {
         const a = arr([3.0, 5.0, 0.0, 1.0]);
         const b = arr([4.0, 12.0, 0.0, 1.0]);
@@ -655,6 +681,19 @@ export function mathTests(getBackend: () => Backend) {
         expect(approxEq(data[1], Math.log(Math.E + Math.E * Math.E), RELAXED_TOL)).toBe(true);
         expect(approxEq(data[2], Math.log(2 * Math.E * Math.E), RELAXED_TOL)).toBe(true);
         expect(approxEq(data[3], 0.0, DEFAULT_TOL)).toBe(true);  // log(0 + 1) = 0
+      });
+
+      it('computes logaddexp2', () => {
+        const a = arr([0.0, 1.0, 2.0, -Infinity]);
+        const b = arr([0.0, 2.0, 2.0, 0.0]);
+        const result = B.logaddexp2(a, b);
+        const data = result.toArray();
+
+        // logaddexp2(a, b) = log2(2^a + 2^b)
+        expect(approxEq(data[0], 1.0, DEFAULT_TOL)).toBe(true);      // log2(1+1) = 1
+        expect(approxEq(data[1], Math.log2(2 + 4), RELAXED_TOL)).toBe(true);  // log2(2^1 + 2^2) = log2(6)
+        expect(approxEq(data[2], 3.0, RELAXED_TOL)).toBe(true);      // log2(4+4) = log2(8) = 3
+        expect(approxEq(data[3], 0.0, DEFAULT_TOL)).toBe(true);      // log2(0 + 1) = 0
       });
 
       it('computes fmax (ignoring NaN)', () => {

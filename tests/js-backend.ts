@@ -266,11 +266,12 @@ export class JsBackend implements Backend {
   }
 
   signbit(arr: NDArray): NDArray {
-    // Returns 1.0 if sign bit is set (negative), 0.0 otherwise
-    // Note: -0 has sign bit set, NaN can have sign bit set
+    // Returns 1.0 if sign bit is set (negative or -0), 0.0 otherwise
+    // NumPy: signbit(NaN) = False, signbit(-0) = True, signbit(-inf) = True
     return new JsNDArray(arr.data.map((x) => {
-      if (Number.isNaN(x)) return Object.is(x, -0) || (1 / x < 0) ? 1 : 0;
-      return x < 0 || Object.is(x, -0) ? 1 : 0;
+      if (Number.isNaN(x)) return 0;  // NumPy returns False for NaN
+      if (Object.is(x, -0)) return 1;  // -0 has sign bit set
+      return x < 0 ? 1 : 0;
     }), arr.shape);
   }
 
@@ -367,10 +368,15 @@ export class JsBackend implements Backend {
   }
 
   copysign(a: NDArray, b: NDArray): NDArray {
+    // Copy sign of b to magnitude of a
+    // NumPy: copysign(5, -0) = -5, copysign(5, +0) = 5
     this._checkSameShape(a, b);
     const data = new Float64Array(a.data.length);
     for (let i = 0; i < a.data.length; i++) {
-      data[i] = Math.abs(a.data[i]) * Math.sign(b.data[i]);
+      const magnitude = Math.abs(a.data[i]);
+      // Use Object.is to detect -0, since Math.sign(0) = 0 and Math.sign(-0) = -0
+      const bNegative = b.data[i] < 0 || Object.is(b.data[i], -0);
+      data[i] = bNegative ? -magnitude : magnitude;
     }
     return new JsNDArray(data, a.shape);
   }

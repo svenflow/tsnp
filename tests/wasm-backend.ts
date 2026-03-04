@@ -255,9 +255,12 @@ export class WasmBackend implements Backend {
   }
 
   signbit(arr: IFaceNDArray): IFaceNDArray {
+    // Returns 1.0 if sign bit is set (negative or -0), 0.0 otherwise
+    // NumPy: signbit(NaN) = False, signbit(-0) = True, signbit(-inf) = True
     const result = Array.from(arr.data).map((x) => {
-      if (Number.isNaN(x)) return Object.is(x, -0) || (1 / x < 0) ? 1 : 0;
-      return x < 0 || Object.is(x, -0) ? 1 : 0;
+      if (Number.isNaN(x)) return 0;  // NumPy returns False for NaN
+      if (Object.is(x, -0)) return 1;  // -0 has sign bit set
+      return x < 0 ? 1 : 0;
     });
     return this.array(result, arr.shape);
   }
@@ -351,9 +354,14 @@ export class WasmBackend implements Backend {
   }
 
   copysign(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
+    // Copy sign of b to magnitude of a
+    // NumPy: copysign(5, -0) = -5, copysign(5, +0) = 5
     const result = new Float64Array(a.data.length);
     for (let i = 0; i < a.data.length; i++) {
-      result[i] = Math.abs(a.data[i]) * Math.sign(b.data[i]);
+      const magnitude = Math.abs(a.data[i]);
+      // Use Object.is to detect -0, since Math.sign(0) = 0 and Math.sign(-0) = -0
+      const bNegative = b.data[i] < 0 || Object.is(b.data[i], -0);
+      result[i] = bNegative ? -magnitude : magnitude;
     }
     return this.array(Array.from(result), a.shape);
   }
