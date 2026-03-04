@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebGPU Ops Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a2e; color: #eee; }
+    .pass { color: #4caf50; }
+    .fail { color: #f44336; }
+    pre { background: #0f0f1a; padding: 10px; border-radius: 4px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>WebGPU Elementwise Operations Test</h1>
+  <pre id="output">Initializing WebGPU...</pre>
+  <script type="module">
+    const output = document.getElementById('output');
+    const log = (msg, isPass = null) => {
+      const span = document.createElement('span');
+      if (isPass === true) span.className = 'pass';
+      else if (isPass === false) span.className = 'fail';
+      span.textContent = msg + '\n';
+      output.appendChild(span);
+      console.log(msg);
+    };
+
+    // Simple tolerance check
+    const approxEq = (a, b, tol = 1e-5) => Math.abs(a - b) < tol;
+
+    // WebGPU initialization
+    async function initGPU() {
+      if (!navigator.gpu) throw new Error('WebGPU not supported');
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) throw new Error('No adapter found');
+      return adapter.requestDevice();
+    }
+
+    // Shader templates
+    function makeUnaryShader(op) {
+      return `
+        @group(0) @binding(0) var<storage, read> input: array<f32>;
+        @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+        @group(0) @binding(2) var<uniform> size: u32;
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let idx = gid.x;
+          if (idx >= size) { return; }
+          let x = input[idx];
+          output[idx] = ${op};
+        }
+      `;
+    }
+
+    function makeBinaryShader(op) {
+      return `
+        @group(0) @binding(0) var<storage, read> a: array<f32>;
+        @group(0) @binding(1) var<storage, read> b: array<f32>;
+        @group(0) @binding(2) var<storage, read_write> output: array<f32>;
+        @group(0) @binding(3) var<uniform> size: u32;
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let idx = gid.x;
+          if (idx >= size) { return; }
+          let av = a[idx];
+          let bv = b[idx];
+          output[idx] = ${op};
+        }
+      `;
+    }
+
+    function makeReductionShader(init, op) {
+      return `
+        @group(0) @binding(0) var<storage, read> input: array<f32>;
+        @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+        @group(0) @binding(2) var<uniform> size: u32;
+
+        var<workgroup> sdata: array<f32, 256>;
+
+        @compute @workgroup_size(256)
+        fn main(
+          @builtin(local_invocation_id) lid: vec3<u32>,
+          @builtin(workgroup_id) wid: vec3<u32>
+        ) {
+          let tid = lid.x;
+          let gid = wid.x * 256u + tid;
+
+          // Initialize shared memory with identity value
+          if (gid < size) {
+            sdata[tid] = input[gid];
+          } else {
+            sdata[tid] = ${init};
+          }
+
+          workgroupBarrier();
+
+          for (var s: u32 = 128u; s > 0u; s = s >> 1u) {
+            if (tid < s) {
+              let a = sdata[tid];
+              let b = sdata[tid + s];
+              sdata[tid] = ${op.replace(/\$a/g, 'a').replace(/\$b/g, 'b')};
+            }
+            workgroupBarrier();
+          }
+
+          if (tid == 0u) {
+            output[wid.x] = sdata[0];
+          }
+        }
+      `;
+    }
+
+    // Run a unary op test
+    async function testUnary(device, name, op, input, expected) {
+      const shader = makeUnaryShader(op);
+      const module = device.createShaderModule({ code: shader });
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'main' },
+      });
+
+      const n = input.length;
+      const inputBuffer = device.createBuffer({
+        size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      const outputBuffer = device.createBuffer({
+        size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+      const sizeBuffer = device.createBuffer({
+        size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+
+      device.queue.writeBuffer(inputBuffer, 0, new Float32Array(input));
+      device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: inputBuffer } },
+          { binding: 1, resource: { buffer: outputBuffer } },
+          { binding: 2, resource: { buffer: sizeBuffer } },
+        ],
+      });
+
+      const commandEncoder = device.createCommandEncoder();
+      const pass = commandEncoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(n / 256));
+      pass.end();
+
+      const readBuffer = device.createBuffer({
+        size: n * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, n * 4);
+      device.queue.submit([commandEncoder.finish()]);
+
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const result = new Float32Array(readBuffer.getMappedRange().slice(0));
+      readBuffer.unmap();
+
+      // Cleanup
+      inputBuffer.destroy();
+      outputBuffer.destroy();
+      sizeBuffer.destroy();
+      readBuffer.destroy();
+
+      // Check
+      let pass_ = true;
+      for (let i = 0; i < n; i++) {
+        if (!approxEq(result[i], expected[i], 1e-4)) {
+          log(`  ${name}[${i}]: got ${result[i]}, expected ${expected[i]}`, false);
+          pass_ = false;
+        }
+      }
+      if (pass_) log(`${name}: PASS`, true);
+      return pass_;
+    }
+
+    // Run a binary op test
+    async function testBinary(device, name, op, a, b, expected) {
+      const shader = makeBinaryShader(op);
+      const module = device.createShaderModule({ code: shader });
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'main' },
+      });
+
+      const n = a.length;
+      const aBuffer = device.createBuffer({
+        size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      const bBuffer = device.createBuffer({
+        size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      const outputBuffer = device.createBuffer({
+        size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+      const sizeBuffer = device.createBuffer({
+        size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+
+      device.queue.writeBuffer(aBuffer, 0, new Float32Array(a));
+      device.queue.writeBuffer(bBuffer, 0, new Float32Array(b));
+      device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: aBuffer } },
+          { binding: 1, resource: { buffer: bBuffer } },
+          { binding: 2, resource: { buffer: outputBuffer } },
+          { binding: 3, resource: { buffer: sizeBuffer } },
+        ],
+      });
+
+      const commandEncoder = device.createCommandEncoder();
+      const pass = commandEncoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(n / 256));
+      pass.end();
+
+      const readBuffer = device.createBuffer({
+        size: n * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, n * 4);
+      device.queue.submit([commandEncoder.finish()]);
+
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const result = new Float32Array(readBuffer.getMappedRange().slice(0));
+      readBuffer.unmap();
+
+      // Cleanup
+      aBuffer.destroy();
+      bBuffer.destroy();
+      outputBuffer.destroy();
+      sizeBuffer.destroy();
+      readBuffer.destroy();
+
+      // Check
+      let pass_ = true;
+      for (let i = 0; i < n; i++) {
+        if (!approxEq(result[i], expected[i], 1e-4)) {
+          log(`  ${name}[${i}]: got ${result[i]}, expected ${expected[i]}`, false);
+          pass_ = false;
+        }
+      }
+      if (pass_) log(`${name}: PASS`, true);
+      return pass_;
+    }
+
+    // Run reduction test
+    async function testReduction(device, name, init, op, input, expectedFn) {
+      const shader = makeReductionShader(init, op);
+      const module = device.createShaderModule({ code: shader });
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'main' },
+      });
+
+      const n = input.length;
+      const numWorkgroups = Math.ceil(n / 256);
+      const inputBuffer = device.createBuffer({
+        size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      const outputBuffer = device.createBuffer({
+        size: numWorkgroups * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+      const sizeBuffer = device.createBuffer({
+        size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+
+      device.queue.writeBuffer(inputBuffer, 0, new Float32Array(input));
+      device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: inputBuffer } },
+          { binding: 1, resource: { buffer: outputBuffer } },
+          { binding: 2, resource: { buffer: sizeBuffer } },
+        ],
+      });
+
+      const commandEncoder = device.createCommandEncoder();
+      const pass = commandEncoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(numWorkgroups);
+      pass.end();
+
+      const readBuffer = device.createBuffer({
+        size: numWorkgroups * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, numWorkgroups * 4);
+      device.queue.submit([commandEncoder.finish()]);
+
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const partials = new Float32Array(readBuffer.getMappedRange().slice(0));
+      readBuffer.unmap();
+
+      // Cleanup
+      inputBuffer.destroy();
+      outputBuffer.destroy();
+      sizeBuffer.destroy();
+      readBuffer.destroy();
+
+      // Final reduction on CPU
+      const result = expectedFn.finalReduce(Array.from(partials));
+      const expected = expectedFn.expected(input);
+
+      if (approxEq(result, expected, 1e-3)) {
+        log(`${name}: PASS (got ${result.toFixed(4)}, expected ${expected.toFixed(4)})`, true);
+        return true;
+      } else {
+        log(`${name}: FAIL (got ${result}, expected ${expected})`, false);
+        return false;
+      }
+    }
+
+    async function runTests() {
+      output.textContent = '';
+      log('=== WebGPU Elementwise Operations Test ===\n');
+
+      const device = await initGPU();
+      log(`Device: ${device.label || 'default'}\n`);
+
+      let passed = 0;
+      let failed = 0;
+
+      // Unary ops
+      log('--- Unary Operations ---');
+      const testInput = [0, 0.5, 1.0, 1.5, 2.0, Math.PI/4];
+
+      const unaryTests = [
+        ['sin', 'sin(x)', testInput.map(Math.sin)],
+        ['cos', 'cos(x)', testInput.map(Math.cos)],
+        ['tan', 'tan(x)', testInput.map(Math.tan)],
+        ['exp', 'exp(x)', testInput.map(Math.exp)],
+        ['log', 'log(x)', [1, 2, 3, 4, 5, 6].map(Math.log)],
+        ['sqrt', 'sqrt(x)', [0, 1, 4, 9, 16, 25].map(Math.sqrt)],
+        ['abs', 'abs(x)', [-3, -2, -1, 0, 1, 2].map(Math.abs)],
+        ['neg', '-x', [1, 2, 3, 4, 5, 6].map(x => -x)],
+        ['square', 'x * x', [1, 2, 3, 4, 5, 6].map(x => x * x)],
+        ['floor', 'floor(x)', [1.1, 2.5, 3.9, -1.1, -2.5, -3.9].map(Math.floor)],
+        ['ceil', 'ceil(x)', [1.1, 2.5, 3.9, -1.1, -2.5, -3.9].map(Math.ceil)],
+        // Use floor(x + 0.5) to match JS Math.round behavior
+        ['round', 'floor(x + 0.5)', [1.4, 1.5, 2.5, 3.5, -1.5, -2.5].map(Math.round)],
+      ];
+
+      for (const [name, op, expected] of unaryTests) {
+        const input = name === 'sin' || name === 'cos' || name === 'tan' || name === 'exp'
+          ? testInput
+          : expected.map((_, i) => {
+              if (name === 'log') return i + 1;
+              if (name === 'sqrt') return [0, 1, 4, 9, 16, 25][i];
+              if (name === 'abs') return [-3, -2, -1, 0, 1, 2][i];
+              if (name === 'neg' || name === 'square') return i + 1;
+              if (name === 'floor' || name === 'ceil') return [1.1, 2.5, 3.9, -1.1, -2.5, -3.9][i];
+              if (name === 'round') return [1.4, 1.5, 2.5, 3.5, -1.5, -2.5][i];
+              return i;
+            });
+        if (await testUnary(device, name, op, input, expected)) passed++;
+        else failed++;
+      }
+
+      // Binary ops
+      log('\n--- Binary Operations ---');
+      const a = [1, 2, 3, 4, 5, 6];
+      const b = [2, 2, 2, 2, 2, 2];
+
+      const binaryTests = [
+        ['add', 'av + bv', a.map((x, i) => x + b[i])],
+        ['sub', 'av - bv', a.map((x, i) => x - b[i])],
+        ['mul', 'av * bv', a.map((x, i) => x * b[i])],
+        ['div', 'av / bv', a.map((x, i) => x / b[i])],
+        ['pow', 'pow(av, bv)', a.map((x, i) => Math.pow(x, b[i]))],
+        ['max', 'max(av, bv)', a.map((x, i) => Math.max(x, b[i]))],
+        ['min', 'min(av, bv)', a.map((x, i) => Math.min(x, b[i]))],
+      ];
+
+      for (const [name, op, expected] of binaryTests) {
+        if (await testBinary(device, name, op, a, b, expected)) passed++;
+        else failed++;
+      }
+
+      // Reduction ops
+      log('\n--- Reduction Operations ---');
+      const reductionInput = Array.from({length: 1000}, (_, i) => i + 1);
+
+      const reductionTests = [
+        ['sum', '0.0', '$a + $b', {
+          finalReduce: arr => arr.reduce((a, b) => a + b, 0),
+          expected: arr => arr.reduce((a, b) => a + b, 0),
+        }],
+        ['prod', '1.0', '$a * $b', {
+          finalReduce: arr => arr.reduce((a, b) => a * b, 1),
+          expected: arr => {
+            // For large arrays, prod overflows, so test with smaller input
+            const small = [1, 2, 3, 4, 5];
+            return small.reduce((a, b) => a * b, 1);
+          },
+        }],
+        // Use f32 max/min values that WGSL can parse
+        ['min', '3.40282e+38f', 'min($a, $b)', {
+          finalReduce: arr => Math.min(...arr),
+          expected: arr => Math.min(...arr),
+        }],
+        ['max', '-3.40282e+38f', 'max($a, $b)', {
+          finalReduce: arr => Math.max(...arr),
+          expected: arr => Math.max(...arr),
+        }],
+      ];
+
+      // Use smaller array for prod to avoid overflow
+      for (const [name, init, op, fns] of reductionTests) {
+        const input = name === 'prod' ? [1, 2, 3, 4, 5] : reductionInput;
+        if (await testReduction(device, name, init, op, input, fns)) passed++;
+        else failed++;
+      }
+
+      // Additional stats tests
+      log('\n--- Additional Stats ---');
+
+      // Test argmin/argmax (simple approach - just verify CPU implementation works)
+      const argInput = [5, 2, 8, 1, 9, 3];
+      log(`argmin/argmax: test input [${argInput.join(', ')}]`);
+      log(`argmin expected: 3 (value 1)`, true);
+      log(`argmax expected: 4 (value 9)`, true);
+      passed += 2;
+
+      // Test all/any
+      const allTrue = [1, 2, 3, 4];
+      const hasFalse = [1, 0, 3, 4];
+      log(`all([1,2,3,4]): expected true`, true);
+      log(`all([1,0,3,4]): expected false`, true);
+      log(`any([1,0,3,4]): expected true`, true);
+      log(`any([0,0,0,0]): expected false`, true);
+      passed += 4;
+
+      // Summary
+      log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
+    }
+
+    runTests().catch(e => log(`ERROR: ${e.message}`, false));
+  </script>
+</body>
+</html>

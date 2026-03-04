@@ -47,6 +47,580 @@ class WebGPUNDArray implements IFaceNDArray {
 
 // ============ WGSL Shaders ============
 
+// ============ Elementwise Shaders ============
+
+// Generic unary operation shader template
+// {{OP}} is replaced with the WGSL operation (e.g., "sin(x)", "exp(x)")
+function makeUnaryShader(op: string): string {
+  return `
+    @group(0) @binding(0) var<storage, read> input: array<f32>;
+    @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+    @group(0) @binding(2) var<uniform> size: u32;
+
+    @compute @workgroup_size(256)
+    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+      let idx = gid.x;
+      if (idx >= size) { return; }
+      let x = input[idx];
+      output[idx] = ${op};
+    }
+  `;
+}
+
+// Generic binary operation shader template
+// {{OP}} is replaced with the WGSL operation (e.g., "a + b", "a * b")
+function makeBinaryShader(op: string): string {
+  return `
+    @group(0) @binding(0) var<storage, read> a: array<f32>;
+    @group(0) @binding(1) var<storage, read> b: array<f32>;
+    @group(0) @binding(2) var<storage, read_write> output: array<f32>;
+    @group(0) @binding(3) var<uniform> size: u32;
+
+    @compute @workgroup_size(256)
+    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+      let idx = gid.x;
+      if (idx >= size) { return; }
+      let av = a[idx];
+      let bv = b[idx];
+      output[idx] = ${op};
+    }
+  `;
+}
+
+// Generic scalar operation shader template
+function makeScalarShader(op: string): string {
+  return `
+    struct Uniforms {
+      size: u32,
+      scalar: f32,
+    }
+
+    @group(0) @binding(0) var<storage, read> input: array<f32>;
+    @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+    @group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+    @compute @workgroup_size(256)
+    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+      let idx = gid.x;
+      if (idx >= uniforms.size) { return; }
+      let x = input[idx];
+      let s = uniforms.scalar;
+      output[idx] = ${op};
+    }
+  `;
+}
+
+// Parallel reduction shader for sum/prod/min/max
+// Uses workgroup shared memory for efficient reduction
+function makeReductionShader(initValue: string, reduceOp: string): string {
+  return `
+    @group(0) @binding(0) var<storage, read> input: array<f32>;
+    @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+    @group(0) @binding(2) var<uniform> size: u32;
+
+    var<workgroup> sdata: array<f32, 256>;
+
+    @compute @workgroup_size(256)
+    fn main(
+      @builtin(local_invocation_id) lid: vec3<u32>,
+      @builtin(workgroup_id) wid: vec3<u32>
+    ) {
+      let tid = lid.x;
+      let gid = wid.x * 256u + tid;
+
+      // Initialize shared memory with identity value
+      // Each thread processes one element if within bounds
+      if (gid < size) {
+        sdata[tid] = input[gid];
+      } else {
+        sdata[tid] = ${initValue};
+      }
+
+      workgroupBarrier();
+
+      // Parallel reduction in shared memory
+      for (var s: u32 = 128u; s > 0u; s = s >> 1u) {
+        if (tid < s) {
+          let a = sdata[tid];
+          let b = sdata[tid + s];
+          sdata[tid] = ${reduceOp.replace(/\$a/g, 'a').replace(/\$b/g, 'b')};
+        }
+        workgroupBarrier();
+      }
+
+      // Write result for this workgroup
+      if (tid == 0u) {
+        output[wid.x] = sdata[0];
+      }
+    }
+  `;
+}
+
+// Unary shader definitions
+const UNARY_SHADERS: Record<string, string> = {
+  sin: makeUnaryShader('sin(x)'),
+  cos: makeUnaryShader('cos(x)'),
+  tan: makeUnaryShader('tan(x)'),
+  asin: makeUnaryShader('asin(x)'),
+  acos: makeUnaryShader('acos(x)'),
+  atan: makeUnaryShader('atan(x)'),
+  sinh: makeUnaryShader('sinh(x)'),
+  cosh: makeUnaryShader('cosh(x)'),
+  tanh: makeUnaryShader('tanh(x)'),
+  exp: makeUnaryShader('exp(x)'),
+  exp2: makeUnaryShader('exp2(x)'),
+  log: makeUnaryShader('log(x)'),
+  log2: makeUnaryShader('log2(x)'),
+  sqrt: makeUnaryShader('sqrt(x)'),
+  abs: makeUnaryShader('abs(x)'),
+  sign: makeUnaryShader('sign(x)'),
+  floor: makeUnaryShader('floor(x)'),
+  ceil: makeUnaryShader('ceil(x)'),
+  // Note: WGSL round() uses banker's rounding (round half to even)
+  // To match JS Math.round (round half up), we use floor(x + 0.5)
+  round: makeUnaryShader('floor(x + 0.5)'),
+  neg: makeUnaryShader('-x'),
+  reciprocal: makeUnaryShader('1.0 / x'),
+  square: makeUnaryShader('x * x'),
+  // cbrt and log10 need special handling (not in WGSL)
+  cbrt: makeUnaryShader('sign(x) * pow(abs(x), 0.333333333333)'),
+  log10: makeUnaryShader('log(x) / 2.302585093'),  // log10(e) = 1/ln(10)
+};
+
+// Binary shader definitions
+const BINARY_SHADERS: Record<string, string> = {
+  add: makeBinaryShader('av + bv'),
+  sub: makeBinaryShader('av - bv'),
+  mul: makeBinaryShader('av * bv'),
+  div: makeBinaryShader('av / bv'),
+  pow: makeBinaryShader('pow(av, bv)'),
+  maximum: makeBinaryShader('max(av, bv)'),
+  minimum: makeBinaryShader('min(av, bv)'),
+};
+
+// Scalar shader definitions
+const SCALAR_SHADERS: Record<string, string> = {
+  addScalar: makeScalarShader('x + s'),
+  subScalar: makeScalarShader('x - s'),
+  mulScalar: makeScalarShader('x * s'),
+  divScalar: makeScalarShader('x / s'),
+  powScalar: makeScalarShader('pow(x, s)'),
+};
+
+// Reduction shader definitions
+const REDUCTION_SHADERS: Record<string, string> = {
+  sum: makeReductionShader('0.0f', '$a + $b'),
+  prod: makeReductionShader('1.0f', '$a * $b'),
+  min: makeReductionShader('3.40282e+38f', 'min($a, $b)'),  // f32 max
+  max: makeReductionShader('-3.40282e+38f', 'max($a, $b)'), // f32 min
+};
+
+// Cumulative sum/prod shader (Hillis-Steele scan)
+const CUMSUM_SHADER = `
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+  @group(0) @binding(2) var<uniform> size: u32;
+
+  @compute @workgroup_size(256)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= size) { return; }
+    // For large arrays, we do a simple serial prefix sum per workgroup
+    // This is a naive implementation - for production we'd use a proper parallel scan
+    var sum: f32 = 0.0;
+    for (var i: u32 = 0u; i <= idx; i = i + 1u) {
+      sum = sum + input[i];
+    }
+    output[idx] = sum;
+  }
+`;
+
+const CUMPROD_SHADER = `
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+  @group(0) @binding(2) var<uniform> size: u32;
+
+  @compute @workgroup_size(256)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= size) { return; }
+    var prod: f32 = 1.0;
+    for (var i: u32 = 0u; i <= idx; i = i + 1u) {
+      prod = prod * input[i];
+    }
+    output[idx] = prod;
+  }
+`;
+
+// Clip shader (min and max bounds)
+const CLIP_SHADER = `
+  struct Uniforms {
+    size: u32,
+    minVal: f32,
+    maxVal: f32,
+    _pad: f32,
+  }
+
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+  @group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+  @compute @workgroup_size(256)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= uniforms.size) { return; }
+    output[idx] = clamp(input[idx], uniforms.minVal, uniforms.maxVal);
+  }
+`;
+
+// ============ Additional Stats Shaders ============
+
+// Argmin/argmax reduction shader - returns index of min/max element
+// Uses two-pass: first find the value, then find the first index
+function makeArgReductionShader(initValue: string, cmpOp: string): string {
+  return `
+    @group(0) @binding(0) var<storage, read> input: array<f32>;
+    @group(0) @binding(1) var<storage, read_write> outputVal: array<f32>;
+    @group(0) @binding(2) var<storage, read_write> outputIdx: array<u32>;
+    @group(0) @binding(3) var<uniform> size: u32;
+
+    var<workgroup> sval: array<f32, 256>;
+    var<workgroup> sidx: array<u32, 256>;
+
+    @compute @workgroup_size(256)
+    fn main(
+      @builtin(local_invocation_id) lid: vec3<u32>,
+      @builtin(workgroup_id) wid: vec3<u32>
+    ) {
+      let tid = lid.x;
+      let gid = wid.x * 256u + tid;
+
+      // Initialize with identity
+      if (gid < size) {
+        sval[tid] = input[gid];
+        sidx[tid] = gid;
+      } else {
+        sval[tid] = ${initValue};
+        sidx[tid] = 0u;
+      }
+
+      workgroupBarrier();
+
+      // Parallel reduction
+      for (var s: u32 = 128u; s > 0u; s = s >> 1u) {
+        if (tid < s) {
+          let va = sval[tid];
+          let vb = sval[tid + s];
+          let ia = sidx[tid];
+          let ib = sidx[tid + s];
+          // ${cmpOp} determines if b is better
+          if (${cmpOp}) {
+            sval[tid] = vb;
+            sidx[tid] = ib;
+          }
+        }
+        workgroupBarrier();
+      }
+
+      if (tid == 0u) {
+        outputVal[wid.x] = sval[0];
+        outputIdx[wid.x] = sidx[0];
+      }
+    }
+  `;
+}
+
+const ARGMIN_SHADER = makeArgReductionShader('3.40282e+38f', 'vb < va');
+const ARGMAX_SHADER = makeArgReductionShader('-3.40282e+38f', 'vb > va');
+
+// All/any reduction shader
+const ALL_SHADER = `
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> output: array<u32>;
+  @group(0) @binding(2) var<uniform> size: u32;
+
+  var<workgroup> sdata: array<u32, 256>;
+
+  @compute @workgroup_size(256)
+  fn main(
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>
+  ) {
+    let tid = lid.x;
+    let gid = wid.x * 256u + tid;
+
+    // All: 1 if all non-zero, 0 if any zero
+    if (gid < size) {
+      sdata[tid] = select(0u, 1u, input[gid] != 0.0f);
+    } else {
+      sdata[tid] = 1u;  // Identity for all
+    }
+
+    workgroupBarrier();
+
+    for (var s: u32 = 128u; s > 0u; s = s >> 1u) {
+      if (tid < s) {
+        sdata[tid] = sdata[tid] & sdata[tid + s];
+      }
+      workgroupBarrier();
+    }
+
+    if (tid == 0u) {
+      output[wid.x] = sdata[0];
+    }
+  }
+`;
+
+const ANY_SHADER = `
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> output: array<u32>;
+  @group(0) @binding(2) var<uniform> size: u32;
+
+  var<workgroup> sdata: array<u32, 256>;
+
+  @compute @workgroup_size(256)
+  fn main(
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>
+  ) {
+    let tid = lid.x;
+    let gid = wid.x * 256u + tid;
+
+    // Any: 1 if any non-zero
+    if (gid < size) {
+      sdata[tid] = select(0u, 1u, input[gid] != 0.0f);
+    } else {
+      sdata[tid] = 0u;  // Identity for any
+    }
+
+    workgroupBarrier();
+
+    for (var s: u32 = 128u; s > 0u; s = s >> 1u) {
+      if (tid < s) {
+        sdata[tid] = sdata[tid] | sdata[tid + s];
+      }
+      workgroupBarrier();
+    }
+
+    if (tid == 0u) {
+      output[wid.x] = sdata[0];
+    }
+  }
+`;
+
+// Sum along axis 0 (columns) for 2D arrays
+const SUM_AXIS0_SHADER = `
+  struct Uniforms {
+    rows: u32,
+    cols: u32,
+  }
+
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+  @group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+  @compute @workgroup_size(256)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let col = gid.x;
+    if (col >= uniforms.cols) { return; }
+
+    var sum: f32 = 0.0f;
+    for (var row: u32 = 0u; row < uniforms.rows; row = row + 1u) {
+      sum = sum + input[row * uniforms.cols + col];
+    }
+    output[col] = sum;
+  }
+`;
+
+// Sum along axis 1 (rows) for 2D arrays
+const SUM_AXIS1_SHADER = `
+  struct Uniforms {
+    rows: u32,
+    cols: u32,
+  }
+
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+  @group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+  @compute @workgroup_size(256)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let row = gid.x;
+    if (row >= uniforms.rows) { return; }
+
+    var sum: f32 = 0.0f;
+    for (var col: u32 = 0u; col < uniforms.cols; col = col + 1u) {
+      sum = sum + input[row * uniforms.cols + col];
+    }
+    output[row] = sum;
+  }
+`;
+
+// ============ Linalg Shaders ============
+
+// Transpose shader
+const TRANSPOSE_SHADER = `
+  struct Uniforms {
+    rows: u32,
+    cols: u32,
+  }
+
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+  @group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+  @compute @workgroup_size(16, 16)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let row = gid.y;
+    let col = gid.x;
+    if (row >= uniforms.rows || col >= uniforms.cols) { return; }
+
+    // input[row, col] -> output[col, row]
+    output[col * uniforms.rows + row] = input[row * uniforms.cols + col];
+  }
+`;
+
+// Outer product: a (m,) x b (n,) -> C (m, n)
+const OUTER_SHADER = `
+  struct Uniforms {
+    m: u32,
+    n: u32,
+  }
+
+  @group(0) @binding(0) var<storage, read> a: array<f32>;
+  @group(0) @binding(1) var<storage, read> b: array<f32>;
+  @group(0) @binding(2) var<storage, read_write> output: array<f32>;
+  @group(0) @binding(3) var<uniform> uniforms: Uniforms;
+
+  @compute @workgroup_size(16, 16)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.y;
+    let j = gid.x;
+    if (i >= uniforms.m || j >= uniforms.n) { return; }
+
+    output[i * uniforms.n + j] = a[i] * b[j];
+  }
+`;
+
+// Dot product (1D arrays)
+const DOT_SHADER = `
+  @group(0) @binding(0) var<storage, read> a: array<f32>;
+  @group(0) @binding(1) var<storage, read> b: array<f32>;
+  @group(0) @binding(2) var<storage, read_write> output: array<f32>;
+  @group(0) @binding(3) var<uniform> size: u32;
+
+  var<workgroup> sdata: array<f32, 256>;
+
+  @compute @workgroup_size(256)
+  fn main(
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>
+  ) {
+    let tid = lid.x;
+    let gid = wid.x * 256u + tid;
+
+    // Multiply and load
+    if (gid < size) {
+      sdata[tid] = a[gid] * b[gid];
+    } else {
+      sdata[tid] = 0.0f;
+    }
+
+    workgroupBarrier();
+
+    // Sum reduction
+    for (var s: u32 = 128u; s > 0u; s = s >> 1u) {
+      if (tid < s) {
+        sdata[tid] = sdata[tid] + sdata[tid + s];
+      }
+      workgroupBarrier();
+    }
+
+    if (tid == 0u) {
+      output[wid.x] = sdata[0];
+    }
+  }
+`;
+
+// Trace of a square matrix
+const TRACE_SHADER = `
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+  @group(0) @binding(2) var<uniform> n: u32;
+
+  var<workgroup> sdata: array<f32, 256>;
+
+  @compute @workgroup_size(256)
+  fn main(
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>
+  ) {
+    let tid = lid.x;
+    let gid = wid.x * 256u + tid;
+
+    // Load diagonal element
+    if (gid < n) {
+      sdata[tid] = input[gid * n + gid];
+    } else {
+      sdata[tid] = 0.0f;
+    }
+
+    workgroupBarrier();
+
+    for (var s: u32 = 128u; s > 0u; s = s >> 1u) {
+      if (tid < s) {
+        sdata[tid] = sdata[tid] + sdata[tid + s];
+      }
+      workgroupBarrier();
+    }
+
+    if (tid == 0u) {
+      output[wid.x] = sdata[0];
+    }
+  }
+`;
+
+// Vector norm (L2)
+const NORM_SHADER = `
+  @group(0) @binding(0) var<storage, read> input: array<f32>;
+  @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+  @group(0) @binding(2) var<uniform> size: u32;
+
+  var<workgroup> sdata: array<f32, 256>;
+
+  @compute @workgroup_size(256)
+  fn main(
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>
+  ) {
+    let tid = lid.x;
+    let gid = wid.x * 256u + tid;
+
+    // Sum of squares
+    if (gid < size) {
+      let v = input[gid];
+      sdata[tid] = v * v;
+    } else {
+      sdata[tid] = 0.0f;
+    }
+
+    workgroupBarrier();
+
+    for (var s: u32 = 128u; s > 0u; s = s >> 1u) {
+      if (tid < s) {
+        sdata[tid] = sdata[tid] + sdata[tid + s];
+      }
+      workgroupBarrier();
+    }
+
+    if (tid == 0u) {
+      output[wid.x] = sdata[0];
+    }
+  }
+`;
+
+// ============ Matmul Shaders ============
+
 // Phase 1: Tiled shader with shared memory
 // - 32x32 tiles loaded into shared memory
 // - Each thread computes 2x2 output elements
@@ -2874,6 +3448,1038 @@ export class WebGPUBackend implements Backend {
     this.bufferManager = new BufferManager(device);
   }
 
+  // Pipeline cache for elementwise shaders
+  private pipelineCache = new Map<string, GPUComputePipeline>();
+
+  private getOrCreatePipeline(key: string, shaderCode: string): GPUComputePipeline {
+    if (this.pipelineCache.has(key)) {
+      return this.pipelineCache.get(key)!;
+    }
+    const module = this.device.createShaderModule({ code: shaderCode });
+    const pipeline = this.device.createComputePipeline({
+      layout: 'auto',
+      compute: { module, entryPoint: 'main' },
+    });
+    this.pipelineCache.set(key, pipeline);
+    return pipeline;
+  }
+
+  // GPU execution helpers
+  private async runUnaryOp(arr: IFaceNDArray, opName: string): Promise<IFaceNDArray> {
+    const shader = UNARY_SHADERS[opName];
+    if (!shader) throw new Error(`Unknown unary op: ${opName}`);
+
+    const pipeline = this.getOrCreatePipeline(`unary_${opName}`, shader);
+    const n = arr.data.length;
+
+    // Create buffers
+    const inputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Upload data (f64 -> f32)
+    const f32Input = new Float32Array(n);
+    for (let i = 0; i < n; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    // Bind and dispatch
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: outputBuffer } },
+        { binding: 2, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(n / 256));
+    passEncoder.end();
+
+    // Read back
+    const readBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, n * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const f32Output = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    // f32 -> f64
+    const f64Output = new Float64Array(n);
+    for (let i = 0; i < n; i++) f64Output[i] = f32Output[i];
+
+    // Cleanup
+    inputBuffer.destroy();
+    outputBuffer.destroy();
+    sizeBuffer.destroy();
+    readBuffer.destroy();
+
+    return this.createArray(f64Output, arr.shape);
+  }
+
+  private async runBinaryOp(a: IFaceNDArray, b: IFaceNDArray, opName: string): Promise<IFaceNDArray> {
+    const shader = BINARY_SHADERS[opName];
+    if (!shader) throw new Error(`Unknown binary op: ${opName}`);
+    if (a.data.length !== b.data.length) throw new Error('Shape mismatch');
+
+    const pipeline = this.getOrCreatePipeline(`binary_${opName}`, shader);
+    const n = a.data.length;
+
+    // Create buffers
+    const aBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const bBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Upload data (f64 -> f32)
+    const f32A = new Float32Array(n);
+    const f32B = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      f32A[i] = a.data[i];
+      f32B[i] = b.data[i];
+    }
+    this.device.queue.writeBuffer(aBuffer, 0, f32A);
+    this.device.queue.writeBuffer(bBuffer, 0, f32B);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    // Bind and dispatch
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: aBuffer } },
+        { binding: 1, resource: { buffer: bBuffer } },
+        { binding: 2, resource: { buffer: outputBuffer } },
+        { binding: 3, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(n / 256));
+    passEncoder.end();
+
+    // Read back
+    const readBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, n * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const f32Output = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    // f32 -> f64
+    const f64Output = new Float64Array(n);
+    for (let i = 0; i < n; i++) f64Output[i] = f32Output[i];
+
+    // Cleanup
+    aBuffer.destroy();
+    bBuffer.destroy();
+    outputBuffer.destroy();
+    sizeBuffer.destroy();
+    readBuffer.destroy();
+
+    return this.createArray(f64Output, a.shape);
+  }
+
+  private async runScalarOp(arr: IFaceNDArray, scalar: number, opName: string): Promise<IFaceNDArray> {
+    const shader = SCALAR_SHADERS[opName];
+    if (!shader) throw new Error(`Unknown scalar op: ${opName}`);
+
+    const pipeline = this.getOrCreatePipeline(`scalar_${opName}`, shader);
+    const n = arr.data.length;
+
+    // Create buffers
+    const inputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const uniformBuffer = this.device.createBuffer({
+      size: 8,  // u32 size + f32 scalar
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Upload data (f64 -> f32)
+    const f32Input = new Float32Array(n);
+    for (let i = 0; i < n; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+
+    // Write uniforms
+    const uniformData = new ArrayBuffer(8);
+    new Uint32Array(uniformData, 0, 1)[0] = n;
+    new Float32Array(uniformData, 4, 1)[0] = scalar;
+    this.device.queue.writeBuffer(uniformBuffer, 0, new Uint8Array(uniformData));
+
+    // Bind and dispatch
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: outputBuffer } },
+        { binding: 2, resource: { buffer: uniformBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(n / 256));
+    passEncoder.end();
+
+    // Read back
+    const readBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, n * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const f32Output = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    // f32 -> f64
+    const f64Output = new Float64Array(n);
+    for (let i = 0; i < n; i++) f64Output[i] = f32Output[i];
+
+    // Cleanup
+    inputBuffer.destroy();
+    outputBuffer.destroy();
+    uniformBuffer.destroy();
+    readBuffer.destroy();
+
+    return this.createArray(f64Output, arr.shape);
+  }
+
+  private async runReduction(arr: IFaceNDArray, opName: string): Promise<number> {
+    const shader = REDUCTION_SHADERS[opName];
+    if (!shader) throw new Error(`Unknown reduction op: ${opName}`);
+
+    const pipeline = this.getOrCreatePipeline(`reduction_${opName}`, shader);
+    const n = arr.data.length;
+    const numWorkgroups = Math.ceil(n / 256);
+
+    // Create buffers
+    const inputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Upload data (f64 -> f32)
+    const f32Input = new Float32Array(n);
+    for (let i = 0; i < n; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    // Bind and dispatch
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: outputBuffer } },
+        { binding: 2, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(numWorkgroups);
+    passEncoder.end();
+
+    // Read back
+    const readBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, numWorkgroups * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const partialResults = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    // Final reduction on CPU (for small number of workgroups)
+    let result: number;
+    if (opName === 'sum') {
+      result = 0;
+      for (let i = 0; i < numWorkgroups; i++) result += partialResults[i];
+    } else if (opName === 'prod') {
+      result = 1;
+      for (let i = 0; i < numWorkgroups; i++) result *= partialResults[i];
+    } else if (opName === 'min') {
+      result = partialResults[0];
+      for (let i = 1; i < numWorkgroups; i++) result = Math.min(result, partialResults[i]);
+    } else if (opName === 'max') {
+      result = partialResults[0];
+      for (let i = 1; i < numWorkgroups; i++) result = Math.max(result, partialResults[i]);
+    } else {
+      throw new Error(`Unknown reduction: ${opName}`);
+    }
+
+    // Cleanup
+    inputBuffer.destroy();
+    outputBuffer.destroy();
+    sizeBuffer.destroy();
+    readBuffer.destroy();
+
+    return result;
+  }
+
+  private async runCumulative(arr: IFaceNDArray, opName: 'cumsum' | 'cumprod'): Promise<IFaceNDArray> {
+    const shader = opName === 'cumsum' ? CUMSUM_SHADER : CUMPROD_SHADER;
+    const pipeline = this.getOrCreatePipeline(opName, shader);
+    const n = arr.data.length;
+
+    // Create buffers
+    const inputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Upload data (f64 -> f32)
+    const f32Input = new Float32Array(n);
+    for (let i = 0; i < n; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    // Bind and dispatch
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: outputBuffer } },
+        { binding: 2, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(n / 256));
+    passEncoder.end();
+
+    // Read back
+    const readBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, n * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const f32Output = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    // f32 -> f64
+    const f64Output = new Float64Array(n);
+    for (let i = 0; i < n; i++) f64Output[i] = f32Output[i];
+
+    // Cleanup
+    inputBuffer.destroy();
+    outputBuffer.destroy();
+    sizeBuffer.destroy();
+    readBuffer.destroy();
+
+    return this.createArray(f64Output, arr.shape);
+  }
+
+  private async runClip(arr: IFaceNDArray, minVal: number, maxVal: number): Promise<IFaceNDArray> {
+    const pipeline = this.getOrCreatePipeline('clip', CLIP_SHADER);
+    const n = arr.data.length;
+
+    // Create buffers
+    const inputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const uniformBuffer = this.device.createBuffer({
+      size: 16,  // u32 + f32 + f32 + padding
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Upload data (f64 -> f32)
+    const f32Input = new Float32Array(n);
+    for (let i = 0; i < n; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+
+    // Write uniforms
+    const uniformData = new ArrayBuffer(16);
+    new Uint32Array(uniformData, 0, 1)[0] = n;
+    new Float32Array(uniformData, 4, 1)[0] = minVal;
+    new Float32Array(uniformData, 8, 1)[0] = maxVal;
+    this.device.queue.writeBuffer(uniformBuffer, 0, new Uint8Array(uniformData));
+
+    // Bind and dispatch
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: outputBuffer } },
+        { binding: 2, resource: { buffer: uniformBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(n / 256));
+    passEncoder.end();
+
+    // Read back
+    const readBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, n * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const f32Output = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    // f32 -> f64
+    const f64Output = new Float64Array(n);
+    for (let i = 0; i < n; i++) f64Output[i] = f32Output[i];
+
+    // Cleanup
+    inputBuffer.destroy();
+    outputBuffer.destroy();
+    uniformBuffer.destroy();
+    readBuffer.destroy();
+
+    return this.createArray(f64Output, arr.shape);
+  }
+
+  // Argmin/argmax reduction
+  private async runArgReduction(arr: IFaceNDArray, opName: 'argmin' | 'argmax'): Promise<number> {
+    if (arr.data.length === 0) throw new Error('zero-size array');
+
+    const shader = opName === 'argmin' ? ARGMIN_SHADER : ARGMAX_SHADER;
+    const pipeline = this.getOrCreatePipeline(opName, shader);
+    const n = arr.data.length;
+    const numWorkgroups = Math.ceil(n / 256);
+
+    // Create buffers
+    const inputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputValBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const outputIdxBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Upload
+    const f32Input = new Float32Array(n);
+    for (let i = 0; i < n; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: outputValBuffer } },
+        { binding: 2, resource: { buffer: outputIdxBuffer } },
+        { binding: 3, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(numWorkgroups);
+    passEncoder.end();
+
+    // Read back indices
+    const readBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const readValBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputIdxBuffer, 0, readBuffer, 0, numWorkgroups * 4);
+    commandEncoder.copyBufferToBuffer(outputValBuffer, 0, readValBuffer, 0, numWorkgroups * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    await readValBuffer.mapAsync(GPUMapMode.READ);
+    const indices = new Uint32Array(readBuffer.getMappedRange().slice(0));
+    const values = new Float32Array(readValBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+    readValBuffer.unmap();
+
+    // Final reduction on CPU
+    let bestIdx = indices[0];
+    let bestVal = values[0];
+    for (let i = 1; i < numWorkgroups; i++) {
+      if (opName === 'argmin' && values[i] < bestVal) {
+        bestVal = values[i];
+        bestIdx = indices[i];
+      } else if (opName === 'argmax' && values[i] > bestVal) {
+        bestVal = values[i];
+        bestIdx = indices[i];
+      }
+    }
+
+    // Cleanup
+    inputBuffer.destroy();
+    outputValBuffer.destroy();
+    outputIdxBuffer.destroy();
+    sizeBuffer.destroy();
+    readBuffer.destroy();
+    readValBuffer.destroy();
+
+    return bestIdx;
+  }
+
+  // All/any reduction
+  private async runBoolReduction(arr: IFaceNDArray, opName: 'all' | 'any'): Promise<boolean> {
+    const shader = opName === 'all' ? ALL_SHADER : ANY_SHADER;
+    const pipeline = this.getOrCreatePipeline(opName, shader);
+    const n = arr.data.length;
+    const numWorkgroups = Math.ceil(n / 256);
+
+    const inputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const f32Input = new Float32Array(n);
+    for (let i = 0; i < n; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: outputBuffer } },
+        { binding: 2, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(numWorkgroups);
+    passEncoder.end();
+
+    const readBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, numWorkgroups * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const results = new Uint32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    // Final reduction
+    let result = opName === 'all' ? 1 : 0;
+    for (let i = 0; i < numWorkgroups; i++) {
+      if (opName === 'all') {
+        result = result & results[i];
+      } else {
+        result = result | results[i];
+      }
+    }
+
+    inputBuffer.destroy();
+    outputBuffer.destroy();
+    sizeBuffer.destroy();
+    readBuffer.destroy();
+
+    return result !== 0;
+  }
+
+  // Sum along axis
+  private async runSumAxis(arr: IFaceNDArray, axis: number): Promise<IFaceNDArray> {
+    if (arr.shape.length !== 2) throw new Error('sumAxis only supports 2D arrays');
+    const [rows, cols] = arr.shape;
+
+    const shader = axis === 0 ? SUM_AXIS0_SHADER : SUM_AXIS1_SHADER;
+    const pipeline = this.getOrCreatePipeline(`sumAxis${axis}`, shader);
+    const outSize = axis === 0 ? cols : rows;
+
+    const inputBuffer = this.device.createBuffer({
+      size: rows * cols * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: outSize * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const uniformBuffer = this.device.createBuffer({
+      size: 8,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const f32Input = new Float32Array(rows * cols);
+    for (let i = 0; i < arr.data.length; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+    this.device.queue.writeBuffer(uniformBuffer, 0, new Uint32Array([rows, cols]));
+
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: outputBuffer } },
+        { binding: 2, resource: { buffer: uniformBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(outSize / 256));
+    passEncoder.end();
+
+    const readBuffer = this.device.createBuffer({
+      size: outSize * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, outSize * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const f32Output = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    const f64Output = new Float64Array(outSize);
+    for (let i = 0; i < outSize; i++) f64Output[i] = f32Output[i];
+
+    inputBuffer.destroy();
+    outputBuffer.destroy();
+    uniformBuffer.destroy();
+    readBuffer.destroy();
+
+    return this.createArray(f64Output, [outSize]);
+  }
+
+  // Transpose
+  private async runTranspose(arr: IFaceNDArray): Promise<IFaceNDArray> {
+    if (arr.shape.length !== 2) throw new Error('transpose only supports 2D arrays');
+    const [rows, cols] = arr.shape;
+
+    const pipeline = this.getOrCreatePipeline('transpose', TRANSPOSE_SHADER);
+
+    const inputBuffer = this.device.createBuffer({
+      size: rows * cols * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: rows * cols * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const uniformBuffer = this.device.createBuffer({
+      size: 8,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const f32Input = new Float32Array(rows * cols);
+    for (let i = 0; i < arr.data.length; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+    this.device.queue.writeBuffer(uniformBuffer, 0, new Uint32Array([rows, cols]));
+
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: outputBuffer } },
+        { binding: 2, resource: { buffer: uniformBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(cols / 16), Math.ceil(rows / 16));
+    passEncoder.end();
+
+    const readBuffer = this.device.createBuffer({
+      size: rows * cols * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, rows * cols * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const f32Output = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    const f64Output = new Float64Array(rows * cols);
+    for (let i = 0; i < rows * cols; i++) f64Output[i] = f32Output[i];
+
+    inputBuffer.destroy();
+    outputBuffer.destroy();
+    uniformBuffer.destroy();
+    readBuffer.destroy();
+
+    return this.createArray(f64Output, [cols, rows]);
+  }
+
+  // Outer product
+  private async runOuter(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> {
+    const m = a.data.length;
+    const n = b.data.length;
+
+    const pipeline = this.getOrCreatePipeline('outer', OUTER_SHADER);
+
+    const aBuffer = this.device.createBuffer({
+      size: m * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const bBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: m * n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const uniformBuffer = this.device.createBuffer({
+      size: 8,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const f32A = new Float32Array(m);
+    const f32B = new Float32Array(n);
+    for (let i = 0; i < m; i++) f32A[i] = a.data[i];
+    for (let i = 0; i < n; i++) f32B[i] = b.data[i];
+    this.device.queue.writeBuffer(aBuffer, 0, f32A);
+    this.device.queue.writeBuffer(bBuffer, 0, f32B);
+    this.device.queue.writeBuffer(uniformBuffer, 0, new Uint32Array([m, n]));
+
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: aBuffer } },
+        { binding: 1, resource: { buffer: bBuffer } },
+        { binding: 2, resource: { buffer: outputBuffer } },
+        { binding: 3, resource: { buffer: uniformBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(Math.ceil(n / 16), Math.ceil(m / 16));
+    passEncoder.end();
+
+    const readBuffer = this.device.createBuffer({
+      size: m * n * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, m * n * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const f32Output = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    const f64Output = new Float64Array(m * n);
+    for (let i = 0; i < m * n; i++) f64Output[i] = f32Output[i];
+
+    aBuffer.destroy();
+    bBuffer.destroy();
+    outputBuffer.destroy();
+    uniformBuffer.destroy();
+    readBuffer.destroy();
+
+    return this.createArray(f64Output, [m, n]);
+  }
+
+  // Dot product (1D)
+  private async runDot(a: IFaceNDArray, b: IFaceNDArray): Promise<number> {
+    if (a.data.length !== b.data.length) throw new Error('Dimension mismatch');
+    const n = a.data.length;
+    const numWorkgroups = Math.ceil(n / 256);
+
+    const pipeline = this.getOrCreatePipeline('dot', DOT_SHADER);
+
+    const aBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const bBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const f32A = new Float32Array(n);
+    const f32B = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      f32A[i] = a.data[i];
+      f32B[i] = b.data[i];
+    }
+    this.device.queue.writeBuffer(aBuffer, 0, f32A);
+    this.device.queue.writeBuffer(bBuffer, 0, f32B);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: aBuffer } },
+        { binding: 1, resource: { buffer: bBuffer } },
+        { binding: 2, resource: { buffer: outputBuffer } },
+        { binding: 3, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(numWorkgroups);
+    passEncoder.end();
+
+    const readBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, numWorkgroups * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const partials = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    let result = 0;
+    for (let i = 0; i < numWorkgroups; i++) result += partials[i];
+
+    aBuffer.destroy();
+    bBuffer.destroy();
+    outputBuffer.destroy();
+    sizeBuffer.destroy();
+    readBuffer.destroy();
+
+    return result;
+  }
+
+  // Trace
+  private async runTrace(arr: IFaceNDArray): Promise<number> {
+    if (arr.shape.length !== 2 || arr.shape[0] !== arr.shape[1]) {
+      throw new Error('trace requires square matrix');
+    }
+    const n = arr.shape[0];
+    const numWorkgroups = Math.ceil(n / 256);
+
+    const pipeline = this.getOrCreatePipeline('trace', TRACE_SHADER);
+
+    const inputBuffer = this.device.createBuffer({
+      size: n * n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const f32Input = new Float32Array(n * n);
+    for (let i = 0; i < arr.data.length; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: outputBuffer } },
+        { binding: 2, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(numWorkgroups);
+    passEncoder.end();
+
+    const readBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, numWorkgroups * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const partials = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    let result = 0;
+    for (let i = 0; i < numWorkgroups; i++) result += partials[i];
+
+    inputBuffer.destroy();
+    outputBuffer.destroy();
+    sizeBuffer.destroy();
+    readBuffer.destroy();
+
+    return result;
+  }
+
+  // Norm (L2)
+  private async runNorm(arr: IFaceNDArray): Promise<number> {
+    const n = arr.data.length;
+    const numWorkgroups = Math.ceil(n / 256);
+
+    const pipeline = this.getOrCreatePipeline('norm', NORM_SHADER);
+
+    const inputBuffer = this.device.createBuffer({
+      size: n * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    const outputBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const sizeBuffer = this.device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const f32Input = new Float32Array(n);
+    for (let i = 0; i < n; i++) f32Input[i] = arr.data[i];
+    this.device.queue.writeBuffer(inputBuffer, 0, f32Input);
+    this.device.queue.writeBuffer(sizeBuffer, 0, new Uint32Array([n]));
+
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: outputBuffer } },
+        { binding: 2, resource: { buffer: sizeBuffer } },
+      ],
+    });
+
+    const commandEncoder = this.device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+    passEncoder.dispatchWorkgroups(numWorkgroups);
+    passEncoder.end();
+
+    const readBuffer = this.device.createBuffer({
+      size: numWorkgroups * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    commandEncoder.copyBufferToBuffer(outputBuffer, 0, readBuffer, 0, numWorkgroups * 4);
+    this.device.queue.submit([commandEncoder.finish()]);
+
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const partials = new Float32Array(readBuffer.getMappedRange().slice(0));
+    readBuffer.unmap();
+
+    let sumSq = 0;
+    for (let i = 0; i < numWorkgroups; i++) sumSq += partials[i];
+
+    inputBuffer.destroy();
+    outputBuffer.destroy();
+    sizeBuffer.destroy();
+    readBuffer.destroy();
+
+    return Math.sqrt(sumSq);
+  }
+
   // Helper methods
   private createArray(data: number[] | Float64Array, shape: number[]): IFaceNDArray {
     const f64 = data instanceof Float64Array ? data : new Float64Array(data);
@@ -3692,6 +5298,139 @@ export class WebGPUBackend implements Backend {
 
   svd(_arr: IFaceNDArray): { u: IFaceNDArray; s: IFaceNDArray; vt: IFaceNDArray } {
     throw new Error('SVD not yet implemented');
+  }
+
+  // ============ Async GPU Operations ============
+  // These use real WebGPU compute shaders for acceleration
+
+  // Unary ops (GPU-accelerated)
+  async sinAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'sin'); }
+  async cosAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'cos'); }
+  async tanAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'tan'); }
+  async arcsinAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'asin'); }
+  async arccosAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'acos'); }
+  async arctanAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'atan'); }
+  async sinhAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'sinh'); }
+  async coshAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'cosh'); }
+  async tanhAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'tanh'); }
+  async expAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'exp'); }
+  async exp2Async(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'exp2'); }
+  async logAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'log'); }
+  async log2Async(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'log2'); }
+  async log10Async(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'log10'); }
+  async sqrtAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'sqrt'); }
+  async cbrtAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'cbrt'); }
+  async absAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'abs'); }
+  async signAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'sign'); }
+  async floorAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'floor'); }
+  async ceilAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'ceil'); }
+  async roundAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'round'); }
+  async negAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'neg'); }
+  async reciprocalAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'reciprocal'); }
+  async squareAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runUnaryOp(arr, 'square'); }
+
+  // Binary ops (GPU-accelerated)
+  async addAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'add'); }
+  async subAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'sub'); }
+  async mulAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'mul'); }
+  async divAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'div'); }
+  async powAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'pow'); }
+  async maximumAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'maximum'); }
+  async minimumAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runBinaryOp(a, b, 'minimum'); }
+
+  // Scalar ops (GPU-accelerated)
+  async addScalarAsync(arr: IFaceNDArray, scalar: number): Promise<IFaceNDArray> { return this.runScalarOp(arr, scalar, 'addScalar'); }
+  async subScalarAsync(arr: IFaceNDArray, scalar: number): Promise<IFaceNDArray> { return this.runScalarOp(arr, scalar, 'subScalar'); }
+  async mulScalarAsync(arr: IFaceNDArray, scalar: number): Promise<IFaceNDArray> { return this.runScalarOp(arr, scalar, 'mulScalar'); }
+  async divScalarAsync(arr: IFaceNDArray, scalar: number): Promise<IFaceNDArray> { return this.runScalarOp(arr, scalar, 'divScalar'); }
+  async powScalarAsync(arr: IFaceNDArray, scalar: number): Promise<IFaceNDArray> { return this.runScalarOp(arr, scalar, 'powScalar'); }
+  async clipAsync(arr: IFaceNDArray, minVal: number, maxVal: number): Promise<IFaceNDArray> { return this.runClip(arr, minVal, maxVal); }
+
+  // Reduction ops (GPU-accelerated)
+  async sumAsync(arr: IFaceNDArray): Promise<number> { return this.runReduction(arr, 'sum'); }
+  async prodAsync(arr: IFaceNDArray): Promise<number> { return this.runReduction(arr, 'prod'); }
+  async minAsync(arr: IFaceNDArray): Promise<number> {
+    if (arr.data.length === 0) throw new Error('zero-size array');
+    return this.runReduction(arr, 'min');
+  }
+  async maxAsync(arr: IFaceNDArray): Promise<number> {
+    if (arr.data.length === 0) throw new Error('zero-size array');
+    return this.runReduction(arr, 'max');
+  }
+
+  // Cumulative ops (GPU-accelerated)
+  async cumsumAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runCumulative(arr, 'cumsum'); }
+  async cumprodAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runCumulative(arr, 'cumprod'); }
+
+  // Derived async stats
+  async meanAsync(arr: IFaceNDArray): Promise<number> {
+    if (arr.data.length === 0) return NaN;
+    const sum = await this.sumAsync(arr);
+    return sum / arr.data.length;
+  }
+
+  async varAsync(arr: IFaceNDArray, ddof: number = 0): Promise<number> {
+    const n = arr.data.length;
+    if (n === 0) return NaN;
+    const mean = await this.meanAsync(arr);
+    // Compute (x - mean)^2, then sum
+    const centered = await this.addScalarAsync(arr, -mean);
+    const squared = await this.squareAsync(centered);
+    const sumSq = await this.sumAsync(squared);
+    return sumSq / (n - ddof);
+  }
+
+  async stdAsync(arr: IFaceNDArray, ddof: number = 0): Promise<number> {
+    return Math.sqrt(await this.varAsync(arr, ddof));
+  }
+
+  // Stats ops (GPU-accelerated)
+  async argminAsync(arr: IFaceNDArray): Promise<number> { return this.runArgReduction(arr, 'argmin'); }
+  async argmaxAsync(arr: IFaceNDArray): Promise<number> { return this.runArgReduction(arr, 'argmax'); }
+  async allAsync(arr: IFaceNDArray): Promise<boolean> { return this.runBoolReduction(arr, 'all'); }
+  async anyAsync(arr: IFaceNDArray): Promise<boolean> { return this.runBoolReduction(arr, 'any'); }
+  async sumAxisAsync(arr: IFaceNDArray, axis: number): Promise<IFaceNDArray> { return this.runSumAxis(arr, axis); }
+  async meanAxisAsync(arr: IFaceNDArray, axis: number): Promise<IFaceNDArray> {
+    const sumResult = await this.runSumAxis(arr, axis);
+    const axisLen = arr.shape[axis];
+    const result = new Float64Array(sumResult.data.length);
+    for (let i = 0; i < result.length; i++) {
+      result[i] = sumResult.data[i] / axisLen;
+    }
+    return this.createArray(result, sumResult.shape);
+  }
+
+  // Linalg ops (GPU-accelerated)
+  async transposeAsync(arr: IFaceNDArray): Promise<IFaceNDArray> { return this.runTranspose(arr); }
+  async outerAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> { return this.runOuter(a, b); }
+  async dotAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<IFaceNDArray> {
+    // For 1D arrays, dot is inner product wrapped in array
+    if (a.shape.length === 1 && b.shape.length === 1) {
+      const result = await this.runDot(a, b);
+      return this.createArray([result], [1]);
+    }
+    // For 2D arrays, use matmul
+    return this.matmulAsync(a, b);
+  }
+  async innerAsync(a: IFaceNDArray, b: IFaceNDArray): Promise<number> { return this.runDot(a, b); }
+  async traceAsync(arr: IFaceNDArray): Promise<number> { return this.runTrace(arr); }
+  async normAsync(arr: IFaceNDArray, ord?: number): Promise<number> {
+    // Default is L2 norm (Frobenius)
+    if (ord === undefined || ord === 2) {
+      return this.runNorm(arr);
+    }
+    // For other norms, fall back to CPU
+    if (ord === 1) {
+      // L1 norm: sum of absolute values
+      const absArr = await this.absAsync(arr);
+      return this.sumAsync(absArr);
+    }
+    if (ord === Infinity) {
+      // Inf norm: max absolute value
+      const absArr = await this.absAsync(arr);
+      return this.maxAsync(absArr);
+    }
+    throw new Error(`Norm ord=${ord} not supported`);
   }
 }
 
