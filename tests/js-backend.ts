@@ -3849,6 +3849,108 @@ export class JsBackend implements Backend {
     return prod;
   }
 
+  // ============ Order Statistics ============
+
+  private _sortedData(arr: NDArray): number[] {
+    return Array.from(arr.data).sort((a, b) => a - b);
+  }
+
+  private _sortedNonNaN(arr: NDArray): number[] {
+    return Array.from(arr.data).filter(x => !Number.isNaN(x)).sort((a, b) => a - b);
+  }
+
+  median(arr: NDArray): number {
+    const sorted = this._sortedData(arr);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 0) {
+      return (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+    return sorted[mid];
+  }
+
+  percentile(arr: NDArray, q: number): number {
+    if (q < 0 || q > 100) throw new Error('percentile must be 0-100');
+    return this.quantile(arr, q / 100);
+  }
+
+  quantile(arr: NDArray, q: number): number {
+    if (q < 0 || q > 1) throw new Error('quantile must be 0-1');
+    const sorted = this._sortedData(arr);
+    if (sorted.length === 0) return NaN;
+    if (sorted.length === 1) return sorted[0];
+    const pos = q * (sorted.length - 1);
+    const lo = Math.floor(pos);
+    const hi = Math.ceil(pos);
+    const frac = pos - lo;
+    return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+  }
+
+  nanmedian(arr: NDArray): number {
+    const sorted = this._sortedNonNaN(arr);
+    if (sorted.length === 0) return NaN;
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 0) {
+      return (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+    return sorted[mid];
+  }
+
+  nanpercentile(arr: NDArray, q: number): number {
+    if (q < 0 || q > 100) throw new Error('percentile must be 0-100');
+    const sorted = this._sortedNonNaN(arr);
+    if (sorted.length === 0) return NaN;
+    if (sorted.length === 1) return sorted[0];
+    const pos = (q / 100) * (sorted.length - 1);
+    const lo = Math.floor(pos);
+    const hi = Math.ceil(pos);
+    const frac = pos - lo;
+    return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+  }
+
+  // ============ Histogram ============
+
+  histogram(arr: NDArray, bins: number = 10): { hist: NDArray; binEdges: NDArray } {
+    const data = arr.data;
+    let min = Infinity, max = -Infinity;
+    for (let i = 0; i < data.length; i++) {
+      if (!Number.isNaN(data[i])) {
+        if (data[i] < min) min = data[i];
+        if (data[i] > max) max = data[i];
+      }
+    }
+    if (min === Infinity) {
+      // All NaN
+      return {
+        hist: new JsNDArray(new Float64Array(bins), [bins]),
+        binEdges: new JsNDArray(new Float64Array(bins + 1), [bins + 1])
+      };
+    }
+
+    const range = max - min;
+    const binWidth = range / bins || 1;
+    const edges = new Float64Array(bins + 1);
+    for (let i = 0; i <= bins; i++) edges[i] = min + i * binWidth;
+
+    const hist = new Float64Array(bins);
+    for (let i = 0; i < data.length; i++) {
+      if (Number.isNaN(data[i])) continue;
+      let binIdx = Math.floor((data[i] - min) / binWidth);
+      if (binIdx >= bins) binIdx = bins - 1;
+      if (binIdx < 0) binIdx = 0;
+      hist[binIdx]++;
+    }
+
+    return {
+      hist: new JsNDArray(hist, [bins]),
+      binEdges: new JsNDArray(edges, [bins + 1])
+    };
+  }
+
+  histogramBinEdges(arr: NDArray, bins: number = 10): NDArray {
+    const { binEdges } = this.histogram(arr, bins);
+    return binEdges;
+  }
+
   // ============ Random ============
   private _rngState: number = Date.now();
 

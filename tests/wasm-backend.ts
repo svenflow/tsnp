@@ -2900,6 +2900,99 @@ export class WasmBackend implements Backend {
     return prod;
   }
 
+  // ============ Order Statistics ============
+
+  median(arr: IFaceNDArray): number {
+    const sorted = Array.from(arr.data).sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length === 0) return NaN;
+    if (sorted.length % 2 === 0) {
+      return (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+    return sorted[mid];
+  }
+
+  percentile(arr: IFaceNDArray, q: number): number {
+    if (arr.data.length === 0) return NaN;
+    const sorted = Array.from(arr.data).sort((a, b) => a - b);
+    const idx = (q / 100) * (sorted.length - 1);
+    const lower = Math.floor(idx);
+    const upper = Math.ceil(idx);
+    if (lower === upper) return sorted[lower];
+    const frac = idx - lower;
+    return sorted[lower] * (1 - frac) + sorted[upper] * frac;
+  }
+
+  quantile(arr: IFaceNDArray, q: number): number {
+    return this.percentile(arr, q * 100);
+  }
+
+  nanmedian(arr: IFaceNDArray): number {
+    const nonNaN = Array.from(arr.data).filter(x => !Number.isNaN(x));
+    if (nonNaN.length === 0) return NaN;
+    const sorted = nonNaN.sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 0) {
+      return (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+    return sorted[mid];
+  }
+
+  nanpercentile(arr: IFaceNDArray, q: number): number {
+    const nonNaN = Array.from(arr.data).filter(x => !Number.isNaN(x));
+    if (nonNaN.length === 0) return NaN;
+    const sorted = nonNaN.sort((a, b) => a - b);
+    const idx = (q / 100) * (sorted.length - 1);
+    const lower = Math.floor(idx);
+    const upper = Math.ceil(idx);
+    if (lower === upper) return sorted[lower];
+    const frac = idx - lower;
+    return sorted[lower] * (1 - frac) + sorted[upper] * frac;
+  }
+
+  // ============ Histogram ============
+
+  histogram(arr: IFaceNDArray, bins: number = 10): { hist: IFaceNDArray; binEdges: IFaceNDArray } {
+    const data = arr.data;
+    let min = Infinity, max = -Infinity;
+    for (let i = 0; i < data.length; i++) {
+      if (!Number.isNaN(data[i])) {
+        if (data[i] < min) min = data[i];
+        if (data[i] > max) max = data[i];
+      }
+    }
+    if (min === Infinity) {
+      return {
+        hist: this.array(Array(bins).fill(0), [bins]),
+        binEdges: this.array(Array(bins + 1).fill(0), [bins + 1])
+      };
+    }
+
+    const range = max - min;
+    const binWidth = range / bins || 1;
+    const edges = new Float64Array(bins + 1);
+    for (let i = 0; i <= bins; i++) edges[i] = min + i * binWidth;
+
+    const hist = new Float64Array(bins);
+    for (let i = 0; i < data.length; i++) {
+      if (Number.isNaN(data[i])) continue;
+      let binIdx = Math.floor((data[i] - min) / binWidth);
+      if (binIdx >= bins) binIdx = bins - 1;
+      if (binIdx < 0) binIdx = 0;
+      hist[binIdx]++;
+    }
+
+    return {
+      hist: this.array(Array.from(hist), [bins]),
+      binEdges: this.array(Array.from(edges), [bins + 1])
+    };
+  }
+
+  histogramBinEdges(arr: IFaceNDArray, bins: number = 10): IFaceNDArray {
+    const { binEdges } = this.histogram(arr, bins);
+    return binEdges;
+  }
+
   // ============ Random ============
 
   seed(s: number): void {

@@ -256,6 +256,17 @@ export interface Backend {
   nanargmax(arr: NDArray): number;
   nanprod(arr: NDArray): number;
 
+  // ============ Order Statistics ============
+  median(arr: NDArray): number;
+  percentile(arr: NDArray, q: number): number;
+  quantile(arr: NDArray, q: number): number;
+  nanmedian(arr: NDArray): number;
+  nanpercentile(arr: NDArray, q: number): number;
+
+  // ============ Histogram ============
+  histogram(arr: NDArray, bins?: number): { hist: NDArray; binEdges: NDArray };
+  histogramBinEdges(arr: NDArray, bins?: number): NDArray;
+
   // ============ Linalg ============
   matmul(a: NDArray, b: NDArray): NDArray;
   dot(a: NDArray, b: NDArray): NDArray;
