@@ -245,6 +245,17 @@ export interface Backend {
   cumsumAxis(arr: NDArray, axis: number): NDArray;
   cumprodAxis(arr: NDArray, axis: number): NDArray;
 
+  // ============ NaN-aware Stats ============
+  nansum(arr: NDArray): number;
+  nanmean(arr: NDArray): number;
+  nanstd(arr: NDArray, ddof?: number): number;
+  nanvar(arr: NDArray, ddof?: number): number;
+  nanmin(arr: NDArray): number;
+  nanmax(arr: NDArray): number;
+  nanargmin(arr: NDArray): number;
+  nanargmax(arr: NDArray): number;
+  nanprod(arr: NDArray): number;
+
   // ============ Linalg ============
   matmul(a: NDArray, b: NDArray): NDArray;
   dot(a: NDArray, b: NDArray): NDArray;

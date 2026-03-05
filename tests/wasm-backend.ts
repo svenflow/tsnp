@@ -2820,6 +2820,86 @@ export class WasmBackend implements Backend {
     // Nothing to do
   }
 
+  // ============ NaN-aware Stats ============
+
+  nansum(arr: IFaceNDArray): number {
+    let sum = 0;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i])) sum += arr.data[i];
+    }
+    return sum;
+  }
+
+  nanmean(arr: IFaceNDArray): number {
+    let sum = 0, count = 0;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i])) { sum += arr.data[i]; count++; }
+    }
+    return count > 0 ? sum / count : NaN;
+  }
+
+  nanvar(arr: IFaceNDArray, ddof: number = 0): number {
+    const mean = this.nanmean(arr);
+    if (Number.isNaN(mean)) return NaN;
+    let sumSq = 0, count = 0;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i])) {
+        const diff = arr.data[i] - mean;
+        sumSq += diff * diff;
+        count++;
+      }
+    }
+    return count > ddof ? sumSq / (count - ddof) : NaN;
+  }
+
+  nanstd(arr: IFaceNDArray, ddof: number = 0): number {
+    return Math.sqrt(this.nanvar(arr, ddof));
+  }
+
+  nanmin(arr: IFaceNDArray): number {
+    let min = Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i]) && arr.data[i] < min) min = arr.data[i];
+    }
+    return min === Infinity ? NaN : min;
+  }
+
+  nanmax(arr: IFaceNDArray): number {
+    let max = -Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i]) && arr.data[i] > max) max = arr.data[i];
+    }
+    return max === -Infinity ? NaN : max;
+  }
+
+  nanargmin(arr: IFaceNDArray): number {
+    let minIdx = -1, minVal = Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i]) && arr.data[i] < minVal) {
+        minVal = arr.data[i]; minIdx = i;
+      }
+    }
+    return minIdx;
+  }
+
+  nanargmax(arr: IFaceNDArray): number {
+    let maxIdx = -1, maxVal = -Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i]) && arr.data[i] > maxVal) {
+        maxVal = arr.data[i]; maxIdx = i;
+      }
+    }
+    return maxIdx;
+  }
+
+  nanprod(arr: IFaceNDArray): number {
+    let prod = 1;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i])) prod *= arr.data[i];
+    }
+    return prod;
+  }
+
   // ============ Random ============
 
   seed(s: number): void {

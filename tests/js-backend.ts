@@ -3769,6 +3769,86 @@ export class JsBackend implements Backend {
     // Nothing to do
   }
 
+  // ============ NaN-aware Stats ============
+
+  nansum(arr: NDArray): number {
+    let sum = 0;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i])) sum += arr.data[i];
+    }
+    return sum;
+  }
+
+  nanmean(arr: NDArray): number {
+    let sum = 0, count = 0;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i])) { sum += arr.data[i]; count++; }
+    }
+    return count > 0 ? sum / count : NaN;
+  }
+
+  nanvar(arr: NDArray, ddof: number = 0): number {
+    const mean = this.nanmean(arr);
+    if (Number.isNaN(mean)) return NaN;
+    let sumSq = 0, count = 0;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i])) {
+        const diff = arr.data[i] - mean;
+        sumSq += diff * diff;
+        count++;
+      }
+    }
+    return count > ddof ? sumSq / (count - ddof) : NaN;
+  }
+
+  nanstd(arr: NDArray, ddof: number = 0): number {
+    return Math.sqrt(this.nanvar(arr, ddof));
+  }
+
+  nanmin(arr: NDArray): number {
+    let min = Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i]) && arr.data[i] < min) min = arr.data[i];
+    }
+    return min === Infinity ? NaN : min;
+  }
+
+  nanmax(arr: NDArray): number {
+    let max = -Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i]) && arr.data[i] > max) max = arr.data[i];
+    }
+    return max === -Infinity ? NaN : max;
+  }
+
+  nanargmin(arr: NDArray): number {
+    let minIdx = -1, minVal = Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i]) && arr.data[i] < minVal) {
+        minVal = arr.data[i]; minIdx = i;
+      }
+    }
+    return minIdx;
+  }
+
+  nanargmax(arr: NDArray): number {
+    let maxIdx = -1, maxVal = -Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i]) && arr.data[i] > maxVal) {
+        maxVal = arr.data[i]; maxIdx = i;
+      }
+    }
+    return maxIdx;
+  }
+
+  nanprod(arr: NDArray): number {
+    let prod = 1;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (!Number.isNaN(arr.data[i])) prod *= arr.data[i];
+    }
+    return prod;
+  }
+
   // ============ Random ============
   private _rngState: number = Date.now();
 
