@@ -382,9 +382,8 @@ export function phase2Tests(getBackend: () => Backend) {
     });
 
     describe('place', () => {
-      // Note: place modifies array in-place. Some backends (WASM) may not support
-      // in-place modification due to copy semantics. Test with JS backend behavior.
-      it.skip('places values at masked positions', async () => {
+      // Note: place modifies array in-place. This works on all backends.
+      it('places values at masked positions', async () => {
         const arr = B.array([0, 0, 0, 0, 0], [5]);
         const mask = B.array([1, 0, 1, 0, 1], [5]);
         const vals = B.array([10, 20, 30], [3]);
@@ -392,7 +391,7 @@ export function phase2Tests(getBackend: () => Backend) {
         expect(arraysApproxEq(await getData(arr, B), [10, 0, 20, 0, 30], DEFAULT_TOL)).toBe(true);
       });
 
-      it.skip('cycles values if too few', async () => {
+      it('cycles values if too few', async () => {
         const arr = B.array([0, 0, 0, 0, 0], [5]);
         const mask = B.array([1, 1, 1, 1, 1], [5]);
         const vals = B.array([1, 2], [2]);
