@@ -668,14 +668,193 @@ export class WasmBackend implements Backend {
     return Math.sqrt(Array.from(arr.data).reduce((acc, x) => acc + x * x, 0));
   }
 
-  qr(_arr: IFaceNDArray): { q: IFaceNDArray; r: IFaceNDArray } {
-    // QR decomposition not yet implemented in WASM
-    throw new Error('QR decomposition not yet implemented in WASM backend');
+  qr(arr: IFaceNDArray): { q: IFaceNDArray; r: IFaceNDArray } {
+    // Modified Gram-Schmidt QR decomposition
+    if (arr.shape.length !== 2) throw new Error('qr requires 2D array');
+    const [m, n] = arr.shape;
+    const k = Math.min(m, n);
+
+    // Copy input to Q
+    const q = new Float64Array(m * n);
+    for (let i = 0; i < m * n; i++) q[i] = arr.data[i];
+
+    const r = new Float64Array(k * n);
+
+    for (let col = 0; col < k; col++) {
+      // Compute norm of column
+      let normSquared = 0;
+      for (let i = 0; i < m; i++) {
+        normSquared += q[i * n + col] ** 2;
+      }
+      const colNorm = Math.sqrt(normSquared);
+      r[col * n + col] = colNorm;
+
+      // Normalize column
+      if (colNorm > 1e-14) {
+        for (let i = 0; i < m; i++) {
+          q[i * n + col] /= colNorm;
+        }
+      }
+
+      // Orthogonalize remaining columns
+      for (let j = col + 1; j < n; j++) {
+        let dot = 0;
+        for (let i = 0; i < m; i++) {
+          dot += q[i * n + col] * q[i * n + j];
+        }
+        r[col * n + j] = dot;
+        for (let i = 0; i < m; i++) {
+          q[i * n + j] -= dot * q[i * n + col];
+        }
+      }
+    }
+
+    return {
+      q: this.array(Array.from(q), [m, n]),
+      r: this.array(Array.from(r), [k, n]),
+    };
   }
 
-  svd(_arr: IFaceNDArray): { u: IFaceNDArray; s: IFaceNDArray; vt: IFaceNDArray } {
-    // SVD not yet implemented in WASM
-    throw new Error('SVD not yet implemented in WASM backend');
+  svd(arr: IFaceNDArray): { u: IFaceNDArray; s: IFaceNDArray; vt: IFaceNDArray } {
+    // SVD via power iteration on A^T A
+    // A = U * S * V^T, where A^T A = V * S^2 * V^T
+    if (arr.shape.length !== 2) throw new Error('svd requires 2D array');
+    const [m, n] = arr.shape;
+    const k = Math.min(m, n);
+
+    // Compute A^T A
+    const at = this.transpose(arr);
+    const ata = this.matmul(at, arr);
+    const ataData = ata.data;
+
+    // Power iteration with deflation
+    const singularValues = new Float64Array(k);
+    const vMatrix = new Float64Array(n * k);
+
+    // Working copy for deflation
+    const ataWork = new Float64Array(n * n);
+    for (let i = 0; i < n * n; i++) ataWork[i] = ataData[i];
+
+    const MAX_ITER = 100;
+    const TOL = 1e-10;
+
+    for (let svIdx = 0; svIdx < k; svIdx++) {
+      // Initialize random vector
+      const v = new Float64Array(n);
+      for (let j = 0; j < n; j++) v[j] = Math.random() - 0.5;
+
+      // Orthogonalize against previous eigenvectors
+      for (let prevIdx = 0; prevIdx < svIdx; prevIdx++) {
+        let dot = 0;
+        for (let j = 0; j < n; j++) {
+          dot += v[j] * vMatrix[j * k + prevIdx];
+        }
+        for (let j = 0; j < n; j++) {
+          v[j] -= dot * vMatrix[j * k + prevIdx];
+        }
+      }
+
+      // Normalize
+      let vNorm = Math.sqrt(v.reduce((acc, x) => acc + x * x, 0));
+      if (vNorm > 1e-10) {
+        for (let j = 0; j < n; j++) v[j] /= vNorm;
+      }
+
+      // Power iteration
+      let eigenvalue = 0;
+      for (let iter = 0; iter < MAX_ITER; iter++) {
+        // v_new = A^T A * v
+        const vNew = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            vNew[i] += ataWork[i * n + j] * v[j];
+          }
+        }
+
+        // Normalize
+        vNorm = Math.sqrt(vNew.reduce((acc, x) => acc + x * x, 0));
+        const prevEigenvalue = eigenvalue;
+        eigenvalue = vNorm;
+
+        if (vNorm > 1e-10) {
+          for (let j = 0; j < n; j++) v[j] = vNew[j] / vNorm;
+        }
+
+        // Re-orthogonalize
+        for (let prevIdx = 0; prevIdx < svIdx; prevIdx++) {
+          let dot = 0;
+          for (let j = 0; j < n; j++) {
+            dot += v[j] * vMatrix[j * k + prevIdx];
+          }
+          for (let j = 0; j < n; j++) {
+            v[j] -= dot * vMatrix[j * k + prevIdx];
+          }
+        }
+        vNorm = Math.sqrt(v.reduce((acc, x) => acc + x * x, 0));
+        if (vNorm > 1e-10) {
+          for (let j = 0; j < n; j++) v[j] /= vNorm;
+        }
+
+        // Check convergence
+        if (Math.abs(eigenvalue - prevEigenvalue) < TOL) break;
+      }
+
+      // Store singular value and V column
+      singularValues[svIdx] = Math.sqrt(Math.abs(eigenvalue));
+      for (let j = 0; j < n; j++) {
+        vMatrix[j * k + svIdx] = v[j];
+      }
+
+      // Deflate: A^T A -= eigenvalue * v * v^T
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          ataWork[i * n + j] -= eigenvalue * v[i] * v[j];
+        }
+      }
+    }
+
+    // Sort by singular value (descending)
+    const indices = Array.from({ length: k }, (_, i) => i);
+    indices.sort((a, b) => singularValues[b] - singularValues[a]);
+
+    const sortedS = new Float64Array(k);
+    const sortedV = new Float64Array(n * k);
+    for (let i = 0; i < k; i++) {
+      sortedS[i] = singularValues[indices[i]];
+      for (let j = 0; j < n; j++) {
+        sortedV[j * k + i] = vMatrix[j * k + indices[i]];
+      }
+    }
+
+    // Compute U = A * V * S^(-1)
+    const vArr = this.array(Array.from(sortedV), [n, k]);
+    const av = this.matmul(arr, vArr);
+    const avData = av.data;
+
+    // Scale by 1/sigma
+    const uData = new Float64Array(m * k);
+    for (let j = 0; j < k; j++) {
+      const sigma = sortedS[j];
+      if (sigma > 1e-10) {
+        for (let i = 0; i < m; i++) {
+          uData[i * k + j] = avData[i * k + j] / sigma;
+        }
+      }
+    }
+
+    // V^T is k x n
+    const vtData = new Float64Array(k * n);
+    for (let i = 0; i < k; i++) {
+      for (let j = 0; j < n; j++) {
+        vtData[i * n + j] = sortedV[j * k + i];
+      }
+    }
+
+    return {
+      u: this.array(Array.from(uData), [m, k]),
+      s: this.array(Array.from(sortedS), [k]),
+      vt: this.array(Array.from(vtData), [k, n]),
+    };
   }
 
   // ============ Advanced Linalg ============
@@ -733,9 +912,20 @@ export class WasmBackend implements Backend {
   }
 
   cond(arr: IFaceNDArray, _p: number | 'fro' = 2): number {
-    // Condition number requires SVD which is not implemented in WASM
-    // For now, throw an error similar to SVD
-    throw new Error('cond requires SVD which is not yet implemented in WASM backend');
+    // Condition number via SVD: max(s) / min(s)
+    const { s } = this.svd(arr);
+    const sData = s.data;
+    if (sData.length === 0) return Infinity;
+
+    let maxS = -Infinity;
+    let minS = Infinity;
+    for (let i = 0; i < sData.length; i++) {
+      if (sData[i] > maxS) maxS = sData[i];
+      if (sData[i] < minS) minS = sData[i];
+    }
+
+    if (minS < 1e-14) return Infinity;
+    return maxS / minS;
   }
 
   slogdet(arr: IFaceNDArray): { sign: number; logabsdet: number } {

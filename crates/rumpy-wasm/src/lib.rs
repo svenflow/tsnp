@@ -1195,6 +1195,50 @@ pub fn solve(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+/// QR decomposition: A = Q * R
+/// Returns [Q, R] where Q is orthogonal and R is upper triangular
+#[wasm_bindgen]
+pub fn qr(arr: &NDArray) -> Result<js_sys::Array, JsValue> {
+    let (q, r) = CpuBackend::qr(&arr.inner)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let result = js_sys::Array::new();
+    result.push(&JsValue::from(NDArray::new(q)));
+    result.push(&JsValue::from(NDArray::new(r)));
+    Ok(result)
+}
+
+/// SVD decomposition: A = U * diag(S) * Vt
+/// Returns [U, S, Vt] where U and Vt are orthogonal, S is singular values
+#[wasm_bindgen]
+pub fn svd(arr: &NDArray) -> Result<js_sys::Array, JsValue> {
+    let (u, s, vt) = CpuBackend::svd(&arr.inner)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let result = js_sys::Array::new();
+    result.push(&JsValue::from(NDArray::new(u)));
+    result.push(&JsValue::from(NDArray::new(s)));
+    result.push(&JsValue::from(NDArray::new(vt)));
+    Ok(result)
+}
+
+/// Condition number of a matrix (using SVD)
+/// Returns max(singular_values) / min(singular_values)
+#[wasm_bindgen]
+pub fn cond(arr: &NDArray) -> Result<f64, JsValue> {
+    let (_, s, _) = CpuBackend::svd(&arr.inner)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let s_data = s.as_f64_slice();
+    if s_data.is_empty() {
+        return Ok(f64::INFINITY);
+    }
+    let max_s = s_data.iter().cloned().fold(0.0_f64, f64::max);
+    let min_s = s_data.iter().cloned().fold(f64::INFINITY, f64::min);
+    if min_s < f64::EPSILON {
+        Ok(f64::INFINITY)
+    } else {
+        Ok(max_s / min_s)
+    }
+}
+
 // ============ Random ============
 
 #[wasm_bindgen(js_name = randomSeed)]
