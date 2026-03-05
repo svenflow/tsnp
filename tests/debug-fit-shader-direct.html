@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Debug: Direct FIT Shader Test</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+    pre { background: #16213e; padding: 15px; border-radius: 8px; white-space: pre-wrap; }
+    button { background: #00d9ff; color: #1a1a2e; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Debug: Direct FIT Shader Test</h1>
+  <button onclick="runTest()">Test FIT Shader</button>
+  <pre id="output">Click to run...</pre>
+
+  <script type="module">
+    const log = (msg) => { document.getElementById('output').textContent += msg + '\n'; };
+
+    // The EXACT FIT shader from native-chrome-benchmark.html
+    const MATMUL_FIT_SHADER = `
+      struct Uniforms { M: u32, K: u32, N: u32, NPadded: u32, }
+      const BLOCK_M: u32 = 64u; const BLOCK_N: u32 = 64u; const BLOCK_K: u32 = 32u;
+      const THREAD_M: u32 = 4u; const THREAD_N: u32 = 4u; const BLOCK_M_PADDED: u32 = 65u;
+      @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+      @group(0) @binding(1) var<storage, read> A: array<f32>;
+      @group(0) @binding(2) var<storage, read> B: array<vec4<f32>>;
+      @group(0) @binding(3) var<storage, read_write> C: array<vec4<f32>>;
+      var<workgroup> As: array<f32, 2080>;
+      var<workgroup> Bs: array<vec4<f32>, 544>;
+      const BLOCK_N_VEC4_PADDED: u32 = 17u;
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+        let K = uniforms.K; let NVec4 = uniforms.NPadded / 4u; let NVec4Out = uniforms.N / 4u;
+        let tx = lid.x; let ty = lid.y; let tid = ty * 16u + tx;
+        let outRowBase = wid.y * BLOCK_M + ty * THREAD_M;
+        let outColVec4 = wid.x * (BLOCK_N / 4u) + tx;
+        var acc0: vec4<f32> = vec4<f32>(0.0); var acc1: vec4<f32> = vec4<f32>(0.0);
+        var acc2: vec4<f32> = vec4<f32>(0.0); var acc3: vec4<f32> = vec4<f32>(0.0);
+        let numTiles = K / BLOCK_K;
+        for (var t: u32 = 0u; t < numTiles; t = t + 1u) {
+          for (var i: u32 = 0u; i < 8u; i = i + 1u) {
+            let loadIdx = tid * 8u + i; let loadK = loadIdx / BLOCK_M; let loadRow = loadIdx % BLOCK_M;
+            let globalK = t * BLOCK_K + loadK; let globalRow = wid.y * BLOCK_M + loadRow;
+            As[loadK * BLOCK_M_PADDED + loadRow] = A[globalRow * K + globalK];
+          }
+          for (var i: u32 = 0u; i < 2u; i = i + 1u) {
+            let loadIdx = tid * 2u + i; let loadK = loadIdx / 16u; let loadColVec = loadIdx % 16u;
+            let globalK = t * BLOCK_K + loadK; let globalColVec = wid.x * 16u + loadColVec;
+            Bs[loadK * BLOCK_N_VEC4_PADDED + loadColVec] = B[globalK * NVec4 + globalColVec];
+          }
+          workgroupBarrier();
+          let aRowBase = ty * THREAD_M;
+          for (var k: u32 = 0u; k < BLOCK_K; k = k + 1u) {
+            let a0 = As[k * BLOCK_M_PADDED + aRowBase]; let a1 = As[k * BLOCK_M_PADDED + aRowBase + 1u];
+            let a2 = As[k * BLOCK_M_PADDED + aRowBase + 2u]; let a3 = As[k * BLOCK_M_PADDED + aRowBase + 3u];
+            let b = Bs[k * BLOCK_N_VEC4_PADDED + tx];
+            acc0 = fma(vec4<f32>(a0), b, acc0); acc1 = fma(vec4<f32>(a1), b, acc1);
+            acc2 = fma(vec4<f32>(a2), b, acc2); acc3 = fma(vec4<f32>(a3), b, acc3);
+          }
+          workgroupBarrier();
+        }
+        C[(outRowBase + 0u) * NVec4Out + outColVec4] = acc0;
+        C[(outRowBase + 1u) * NVec4Out + outColVec4] = acc1;
+        C[(outRowBase + 2u) * NVec4Out + outColVec4] = acc2;
+        C[(outRowBase + 3u) * NVec4Out + outColVec4] = acc3;
+      }
+    `;
+
+    // CPU reference matmul
+    function cpuMatmul(M, K, N, aData, bData) {
+      const result = new Float32Array(M * N);
+      for (let m = 0; m < M; m++) {
+        for (let n = 0; n < N; n++) {
+          let sum = 0;
+          for (let k = 0; k < K; k++) {
+            sum += aData[m * K + k] * bData[k * N + n];
+          }
+          result[m * N + n] = sum;
+        }
+      }
+      return result;
+    }
+
+    window.runTest = async function() {
+      document.getElementById('output').textContent = '';
+      log('Initializing WebGPU...');
+
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice({
+        requiredLimits: {
+          maxStorageBufferBindingSize: 1024 * 1024 * 1024,
+          maxBufferSize: 1024 * 1024 * 1024,
+        }
+      });
+      log('WebGPU initialized: ' + (adapter.name || 'unknown'));
+
+      // Small test: 64x64
+      const M = 64, K = 64, N = 64;
+      const NPadded = Math.ceil(N / 4) * 4;
+
+      log(`\nTesting ${M}x${K} @ ${K}x${N} matmul...`);
+
+      // Create test data
+      const aData = new Float32Array(M * K);
+      const bData = new Float32Array(K * N);
+      for (let i = 0; i < M * K; i++) aData[i] = (i % 17) * 0.1 - 0.8;
+      for (let i = 0; i < K * N; i++) bData[i] = (i % 13) * 0.1 - 0.6;
+
+      // CPU reference
+      const cpuResult = cpuMatmul(M, K, N, aData, bData);
+      log(`CPU result first 5: [${Array.from(cpuResult.slice(0, 5)).map(v => v.toFixed(4)).join(', ')}]`);
+
+      // Create GPU buffers
+      const uniformBuffer = device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      device.queue.writeBuffer(uniformBuffer, 0, new Uint32Array([M, K, N, NPadded]));
+
+      const aBuffer = device.createBuffer({
+        size: aData.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      device.queue.writeBuffer(aBuffer, 0, aData);
+
+      // Pad B to vec4 alignment
+      const BVec4Size = Math.ceil(N / 4) * K;
+      const bPadded = new Float32Array(BVec4Size * 4);
+      for (let k = 0; k < K; k++) {
+        for (let n = 0; n < N; n++) {
+          bPadded[k * NPadded + n] = bData[k * N + n];
+        }
+      }
+      const bBuffer = device.createBuffer({
+        size: bPadded.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      device.queue.writeBuffer(bBuffer, 0, bPadded);
+
+      const cBuffer = device.createBuffer({
+        size: M * NPadded * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+
+      // Create pipeline
+      log('Creating shader module...');
+      const shaderModule = device.createShaderModule({ code: MATMUL_FIT_SHADER });
+
+      // Check for compilation errors
+      const compilationInfo = await shaderModule.getCompilationInfo();
+      if (compilationInfo.messages.length > 0) {
+        log('Shader compilation messages:');
+        for (const msg of compilationInfo.messages) {
+          log(`  ${msg.type}: ${msg.message} (line ${msg.lineNum})`);
+        }
+      }
+
+      log('Creating pipeline...');
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: shaderModule, entryPoint: 'main' },
+      });
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: { buffer: aBuffer } },
+          { binding: 2, resource: { buffer: bBuffer } },
+          { binding: 3, resource: { buffer: cBuffer } },
+        ],
+      });
+
+      // Dispatch
+      const workgroupsX = Math.ceil(N / 64);
+      const workgroupsY = Math.ceil(M / 64);
+      log(`Dispatching ${workgroupsX} x ${workgroupsY} workgroups...`);
+
+      const commandEncoder = device.createCommandEncoder();
+      const pass = commandEncoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+      pass.end();
+
+      // Read back
+      const stagingBuffer = device.createBuffer({
+        size: M * NPadded * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      commandEncoder.copyBufferToBuffer(cBuffer, 0, stagingBuffer, 0, M * NPadded * 4);
+
+      device.queue.submit([commandEncoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await stagingBuffer.mapAsync(GPUMapMode.READ);
+      const resultPadded = new Float32Array(stagingBuffer.getMappedRange().slice(0));
+      stagingBuffer.unmap();
+
+      // Unpad result
+      const gpuResult = new Float32Array(M * N);
+      for (let m = 0; m < M; m++) {
+        for (let n = 0; n < N; n++) {
+          gpuResult[m * N + n] = resultPadded[m * NPadded + n];
+        }
+      }
+
+      log(`GPU result first 5: [${Array.from(gpuResult.slice(0, 5)).map(v => v.toFixed(4)).join(', ')}]`);
+
+      // Compare
+      let maxRelError = 0;
+      let allZeros = true;
+      for (let i = 0; i < M * N; i++) {
+        if (gpuResult[i] !== 0) allZeros = false;
+        const absErr = Math.abs(cpuResult[i] - gpuResult[i]);
+        const relErr = Math.abs(cpuResult[i]) > 1e-6 ? absErr / Math.abs(cpuResult[i]) : absErr;
+        maxRelError = Math.max(maxRelError, relErr);
+      }
+
+      log(`\nAll zeros: ${allZeros}`);
+      log(`Max relative error: ${(maxRelError * 100).toFixed(4)}%`);
+      log(`Status: ${maxRelError < 0.01 && !allZeros ? 'PASS ✓' : 'FAIL ✗'}`);
+
+      // Cleanup
+      uniformBuffer.destroy();
+      aBuffer.destroy();
+      bBuffer.destroy();
+      cBuffer.destroy();
+      stagingBuffer.destroy();
+    };
+  </script>
+</body>
+</html>

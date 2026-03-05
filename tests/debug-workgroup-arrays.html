@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Debug: 1D vs 2D Workgroup Arrays</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+    .pass { color: #0f8; }
+    .fail { color: #f55; }
+    pre { background: #16213e; padding: 15px; border-radius: 8px; }
+    button { background: #00d9ff; color: #1a1a2e; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Debug: 1D vs 2D Workgroup Arrays</h1>
+  <p>Testing if the bug is caused by 1D vs 2D array syntax in var&lt;workgroup&gt;</p>
+  <button onclick="runTests()">Run Tests</button>
+  <pre id="output">Click button to run tests...</pre>
+
+  <script type="module">
+    let device = null;
+    const log = (msg) => { document.getElementById('output').textContent += msg + '\n'; };
+
+    async function init() {
+      const adapter = await navigator.gpu.requestAdapter();
+      device = await adapter.requestDevice();
+      log('WebGPU initialized: ' + adapter.name);
+    }
+
+    // Test 1: 1D array (our current approach)
+    const SHADER_1D = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> shared1d: array<f32, 256>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+
+        // Write to shared memory
+        shared1d[tid] = f32(g) + 100.0;
+        workgroupBarrier();
+
+        // Read from neighbor and write to output
+        let neighbor = (tid + 1u) % 256u;
+        output[g] = shared1d[neighbor];
+      }
+    `;
+
+    // Test 2: 2D array (tfjs style)
+    const SHADER_2D = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> shared2d: array<array<f32, 16>, 16>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let row = lid.y;
+        let col = lid.x;
+        let g = gid.y * 16u + gid.x;
+
+        // Write to shared memory
+        shared2d[row][col] = f32(g) + 100.0;
+        workgroupBarrier();
+
+        // Read from neighbor and write to output
+        let neighborCol = (col + 1u) % 16u;
+        output[g] = shared2d[row][neighborCol];
+      }
+    `;
+
+    // Test 3: 1D array with vec4 elements (like our Bs buffer)
+    const SHADER_1D_VEC4 = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> shared1d_vec4: array<vec4<f32>, 64>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+        let vecIdx = tid / 4u;
+        let compIdx = tid % 4u;
+
+        // Write to shared memory
+        if (compIdx == 0u) {
+          shared1d_vec4[vecIdx] = vec4<f32>(f32(g) + 100.0);
+        }
+        workgroupBarrier();
+
+        // Read from shared memory
+        let readVec = shared1d_vec4[vecIdx / 4u];
+        output[g] = readVec.x;
+      }
+    `;
+
+    // Test 4: 2D array with vec4 elements (tfjs style)
+    const SHADER_2D_VEC4 = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> shared2d_vec4: array<array<vec4<f32>, 8>, 32>;
+
+      @compute @workgroup_size(8, 8)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let row = lid.y;
+        let col = lid.x;
+        let g = gid.y * 8u + gid.x;
+
+        // Write to shared memory
+        shared2d_vec4[row][col] = vec4<f32>(f32(g) + 100.0);
+        workgroupBarrier();
+
+        // Read from neighbor and write to output
+        let neighborCol = (col + 1u) % 8u;
+        output[g] = shared2d_vec4[row][neighborCol].x;
+      }
+    `;
+
+    // Test 5: NO shared memory, just write constant (baseline)
+    const SHADER_NO_SHARED = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+        let g = gid.y * 16u + gid.x;
+        output[g] = 777.0;
+      }
+    `;
+
+    // Test 6: Has shared memory but doesn't use it
+    const SHADER_UNUSED_SHARED = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> unused_shared: array<f32, 256>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+        let g = gid.y * 16u + gid.x;
+        output[g] = 888.0;
+      }
+    `;
+
+    async function runShader(name, code, workgroupSize, dispatchSize) {
+      const outBuffer = device.createBuffer({
+        size: 256 * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+
+      const module = device.createShaderModule({ code });
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'main' },
+      });
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: outBuffer } }],
+      });
+
+      const commandEncoder = device.createCommandEncoder();
+      const pass = commandEncoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(dispatchSize, dispatchSize);
+      pass.end();
+
+      const staging = device.createBuffer({
+        size: 256 * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      commandEncoder.copyBufferToBuffer(outBuffer, 0, staging, 0, 256 * 4);
+      device.queue.submit([commandEncoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const result = new Float32Array(staging.getMappedRange().slice(0));
+      staging.unmap();
+      outBuffer.destroy();
+      staging.destroy();
+
+      const first10 = Array.from(result.slice(0, 10));
+      const hasNonZero = first10.some(v => v !== 0);
+      const status = hasNonZero ? 'PASS' : 'FAIL';
+      log(`${name}: [${first10.map(v => v.toFixed(1)).join(', ')}] - ${status}`);
+      return hasNonZero;
+    }
+
+    window.runTests = async function() {
+      document.getElementById('output').textContent = '';
+      log('Initializing WebGPU...');
+      await init();
+      log('');
+      log('=== Testing Workgroup Array Syntax ===');
+      log('');
+
+      // Baseline - no shared memory
+      log('--- Baseline tests ---');
+      await runShader('No shared memory', SHADER_NO_SHARED, 256, 1);
+      await runShader('Unused shared (1D)', SHADER_UNUSED_SHARED, 256, 1);
+      log('');
+
+      // The actual tests
+      log('--- Shared memory tests ---');
+      await runShader('1D array (our style)', SHADER_1D, 256, 1);
+      await runShader('2D array (tfjs style)', SHADER_2D, 256, 1);
+      log('');
+
+      log('--- Vec4 shared memory tests ---');
+      await runShader('1D array<vec4>', SHADER_1D_VEC4, 256, 1);
+      await runShader('2D array<vec4> (tfjs style)', SHADER_2D_VEC4, 64, 1);
+
+      log('');
+      log('=== Done ===');
+    };
+  </script>
+</body>
+</html>

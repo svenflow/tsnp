@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Debug: Two Arrays Size Threshold</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+    pre { background: #16213e; padding: 15px; border-radius: 8px; white-space: pre-wrap; }
+    button { background: #00d9ff; color: #1a1a2e; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Debug: Two Arrays Size Threshold</h1>
+  <button onclick="runTests()">Run Tests</button>
+  <pre id="output">Click to run...</pre>
+
+  <script type="module">
+    const log = (msg) => { document.getElementById('output').textContent += msg + '\n'; };
+
+    function makeShader(sizeA, sizeB) {
+      return `
+        @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+        var<workgroup> As: array<f32, ${sizeA}>;
+        var<workgroup> Bs: array<vec4<f32>, ${sizeB}>;
+
+        @compute @workgroup_size(16, 16)
+        fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+          let tid = lid.y * 16u + lid.x;
+          let g = gid.y * 16u + gid.x;
+
+          As[tid % ${sizeA}u] = f32(g) + 100.0;
+          Bs[tid % ${sizeB}u] = vec4<f32>(f32(g) + 200.0);
+          workgroupBarrier();
+          output[g] = As[tid % ${sizeA}u] + Bs[tid % ${sizeB}u].x;
+        }
+      `;
+    }
+
+    async function runShader(name, code, device) {
+      const outBuffer = device.createBuffer({
+        size: 256 * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+
+      const module = device.createShaderModule({ code });
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'main' },
+      });
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: outBuffer } }],
+      });
+
+      const commandEncoder = device.createCommandEncoder();
+      const pass = commandEncoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(1, 1);
+      pass.end();
+
+      const staging = device.createBuffer({
+        size: 256 * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      commandEncoder.copyBufferToBuffer(outBuffer, 0, staging, 0, 256 * 4);
+      device.queue.submit([commandEncoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const result = new Float32Array(staging.getMappedRange().slice(0));
+      staging.unmap();
+      outBuffer.destroy();
+      staging.destroy();
+
+      const first3 = Array.from(result.slice(0, 3));
+      const hasNonZero = first3.some(v => v !== 0);
+      log(`${name}: [${first3.map(v => v.toFixed(0)).join(', ')}] - ${hasNonZero ? 'PASS' : 'FAIL'}`);
+    }
+
+    window.runTests = async function() {
+      document.getElementById('output').textContent = '';
+      log('Initializing WebGPU...');
+
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+
+      // Get limits
+      const limits = device.limits;
+      log(`Max workgroup storage: ${limits.maxComputeWorkgroupStorageSize} bytes`);
+      log('');
+
+      log('=== Testing Two-Array Sizes ===');
+      log('Format: As[f32] + Bs[vec4<f32>] = total bytes\n');
+
+      // Small combinations
+      await runShader('256 + 64 = 1KB + 1KB = 2KB', makeShader(256, 64), device);
+      await runShader('512 + 128 = 2KB + 2KB = 4KB', makeShader(512, 128), device);
+      await runShader('1024 + 256 = 4KB + 4KB = 8KB', makeShader(1024, 256), device);
+      await runShader('2048 + 512 = 8KB + 8KB = 16KB', makeShader(2048, 512), device);
+
+      log('');
+      log('=== FIT shader sizes ===');
+      // FIT uses As[2080] + Bs[544]
+      // = 2080*4 + 544*16 = 8320 + 8704 = 17024 bytes = ~16.6KB
+      await runShader('2080 + 544 = 8.3KB + 8.7KB = 17KB', makeShader(2080, 544), device);
+
+      // Try reducing one array
+      log('');
+      log('=== Reducing sizes ===');
+      await runShader('2080 + 256 = 8.3KB + 4KB = 12.3KB', makeShader(2080, 256), device);
+      await runShader('1024 + 544 = 4KB + 8.7KB = 12.7KB', makeShader(1024, 544), device);
+      await runShader('1024 + 256 = 4KB + 4KB = 8KB', makeShader(1024, 256), device);
+      await runShader('2048 + 544 = 8KB + 8.7KB = 16.7KB', makeShader(2048, 544), device);
+
+      log('\n=== Done ===');
+    };
+  </script>
+</body>
+</html>

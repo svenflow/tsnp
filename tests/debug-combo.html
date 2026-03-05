@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Debug: Feature Combinations</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+    pre { background: #16213e; padding: 15px; border-radius: 8px; white-space: pre-wrap; }
+    button { background: #00d9ff; color: #1a1a2e; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Debug: Feature Combinations</h1>
+  <button onclick="runTests()">Run Tests</button>
+  <pre id="output">Click to run...</pre>
+
+  <script type="module">
+    const log = (msg) => { document.getElementById('output').textContent += msg + '\n'; };
+
+    // Combo A: Two arrays (one f32, one vec4) - no loop
+    const SHADER_TWO_TYPES = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> As: array<f32, 256>;
+      var<workgroup> Bs: array<vec4<f32>, 64>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+
+        As[tid] = f32(g) + 100.0;
+        Bs[tid / 4u] = vec4<f32>(f32(g) + 200.0);
+        workgroupBarrier();
+        output[g] = As[tid] + Bs[tid / 4u].x;
+      }
+    `;
+
+    // Combo B: Large two arrays (2080 + 544) - no loop
+    const SHADER_LARGE_TWO = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> As: array<f32, 2080>;
+      var<workgroup> Bs: array<vec4<f32>, 544>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+
+        As[tid] = f32(g) + 100.0;
+        Bs[tid] = vec4<f32>(f32(g) + 200.0);
+        workgroupBarrier();
+        output[g] = As[tid] + Bs[tid].x;
+      }
+    `;
+
+    // Combo C: Large two arrays with loop
+    const SHADER_LARGE_TWO_LOOP = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> As: array<f32, 2080>;
+      var<workgroup> Bs: array<vec4<f32>, 544>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+
+        var acc: f32 = 0.0;
+        for (var t: u32 = 0u; t < 2u; t = t + 1u) {
+          As[tid] = f32(g) + f32(t) * 100.0;
+          Bs[tid] = vec4<f32>(f32(g) + f32(t) * 200.0);
+          workgroupBarrier();
+          acc = acc + As[tid] + Bs[tid].x;
+          workgroupBarrier();
+        }
+        output[g] = acc;
+      }
+    `;
+
+    // Combo D: vec4 OUTPUT + two arrays + loop
+    const SHADER_VEC4_OUT_COMBO = `
+      @group(0) @binding(0) var<storage, read_write> output: array<vec4<f32>>;
+      var<workgroup> As: array<f32, 256>;
+      var<workgroup> Bs: array<vec4<f32>, 64>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+
+        var acc: vec4<f32> = vec4<f32>(0.0);
+        for (var t: u32 = 0u; t < 2u; t = t + 1u) {
+          As[tid] = f32(g) + f32(t) * 100.0;
+          Bs[tid / 4u] = vec4<f32>(f32(g) + f32(t) * 200.0);
+          workgroupBarrier();
+          acc = acc + vec4<f32>(As[tid]) + Bs[tid / 4u];
+          workgroupBarrier();
+        }
+        output[g] = acc;
+      }
+    `;
+
+    // Combo E: LARGE arrays + vec4 output (no loop)
+    const SHADER_LARGE_VEC4_OUT = `
+      @group(0) @binding(0) var<storage, read_write> output: array<vec4<f32>>;
+      var<workgroup> As: array<f32, 2080>;
+      var<workgroup> Bs: array<vec4<f32>, 544>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+
+        As[tid] = f32(g) + 100.0;
+        Bs[tid] = vec4<f32>(f32(g) + 200.0);
+        workgroupBarrier();
+        output[g] = vec4<f32>(As[tid]) + Bs[tid];
+      }
+    `;
+
+    // Combo F: LARGE arrays + vec4 output + loop (THE FULL THING)
+    const SHADER_FULL = `
+      @group(0) @binding(0) var<storage, read_write> output: array<vec4<f32>>;
+      var<workgroup> As: array<f32, 2080>;
+      var<workgroup> Bs: array<vec4<f32>, 544>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+
+        var acc: vec4<f32> = vec4<f32>(0.0);
+        for (var t: u32 = 0u; t < 2u; t = t + 1u) {
+          As[tid] = f32(g) + f32(t) * 100.0;
+          Bs[tid] = vec4<f32>(f32(g) + f32(t) * 200.0);
+          workgroupBarrier();
+          acc = acc + vec4<f32>(As[tid]) + Bs[tid];
+          workgroupBarrier();
+        }
+        output[g] = acc;
+      }
+    `;
+
+    async function runShader(name, code, device, outputSize = 256 * 4) {
+      const outBuffer = device.createBuffer({
+        size: outputSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+
+      const module = device.createShaderModule({ code });
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'main' },
+      });
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: outBuffer } }],
+      });
+
+      const commandEncoder = device.createCommandEncoder();
+      const pass = commandEncoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(1, 1);
+      pass.end();
+
+      const staging = device.createBuffer({
+        size: outputSize,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      commandEncoder.copyBufferToBuffer(outBuffer, 0, staging, 0, outputSize);
+      device.queue.submit([commandEncoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const result = new Float32Array(staging.getMappedRange().slice(0));
+      staging.unmap();
+      outBuffer.destroy();
+      staging.destroy();
+
+      const first5 = Array.from(result.slice(0, 5));
+      const hasNonZero = first5.some(v => v !== 0);
+      log(`${name}: [${first5.map(v => v.toFixed(0)).join(', ')}] - ${hasNonZero ? 'PASS' : 'FAIL'}`);
+    }
+
+    window.runTests = async function() {
+      document.getElementById('output').textContent = '';
+      log('Initializing WebGPU...');
+
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+      log('WebGPU initialized\n');
+
+      log('=== Narrowing Down the Bug ===\n');
+
+      await runShader('A: Two types (f32+vec4)', SHADER_TWO_TYPES, device);
+      await runShader('B: Large two (2080+544)', SHADER_LARGE_TWO, device);
+      await runShader('C: Large two + loop', SHADER_LARGE_TWO_LOOP, device);
+      await runShader('D: vec4 out + two + loop', SHADER_VEC4_OUT_COMBO, device, 256 * 16);
+      await runShader('E: Large + vec4 out', SHADER_LARGE_VEC4_OUT, device, 256 * 16);
+      await runShader('F: FULL (large+vec4+loop)', SHADER_FULL, device, 256 * 16);
+
+      log('\n=== Done ===');
+    };
+  </script>
+</body>
+</html>

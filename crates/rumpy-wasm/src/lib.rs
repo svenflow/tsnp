@@ -4265,8 +4265,9 @@ pub fn minimum_scalar(arr: &NDArray, scalar: f64) -> NDArray {
 ///
 /// Like maximum, but ignores NaN values - returns non-NaN when one is NaN.
 /// Equivalent to numpy.fmax(a, b).
-#[wasm_bindgen]
-pub fn fmax(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
+/// NOTE: Rust function name is fmax_op to avoid collision with C stdlib fmax()
+#[wasm_bindgen(js_name = fmaxArr)]
+pub fn fmax_op(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
     let a_data = a.inner.as_ndarray();
     let b_data = b.inner.as_ndarray();
 
@@ -4314,8 +4315,9 @@ pub fn fmax(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
 ///
 /// Like minimum, but ignores NaN values - returns non-NaN when one is NaN.
 /// Equivalent to numpy.fmin(a, b).
-#[wasm_bindgen]
-pub fn fmin(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
+/// NOTE: Rust function name is fmin_op to avoid collision with C stdlib fmin()
+#[wasm_bindgen(js_name = fminArr)]
+pub fn fmin_op(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
     let a_data = a.inner.as_ndarray();
     let b_data = b.inner.as_ndarray();
 
@@ -4398,28 +4400,6 @@ pub fn atan2_arr(y: &NDArray, x: &NDArray) -> Result<NDArray, JsValue> {
         .and(&*x_data)
         .map_collect(|&yv, &xv| yv.atan2(xv));
     Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
-}
-
-/// Element-wise log(1 + x)
-///
-/// Computes log(1 + x) with better precision for small x.
-/// Equivalent to numpy.log1p(x).
-#[wasm_bindgen(js_name = log1pArr)]
-pub fn log1p_arr(arr: &NDArray) -> NDArray {
-    let data = arr.inner.as_ndarray();
-    let result = data.mapv(|v| v.ln_1p());
-    NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result))
-}
-
-/// Element-wise exp(x) - 1
-///
-/// Computes exp(x) - 1 with better precision for small x.
-/// Equivalent to numpy.expm1(x).
-#[wasm_bindgen(js_name = expm1Arr)]
-pub fn expm1_arr(arr: &NDArray) -> NDArray {
-    let data = arr.inner.as_ndarray();
-    let result = data.mapv(|v| v.exp_m1());
-    NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result))
 }
 
 /// Element-wise log(exp(x1) + exp(x2)) computed in a numerically stable way.

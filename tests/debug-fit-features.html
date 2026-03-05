@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Debug: FIT Shader Features</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+    pre { background: #16213e; padding: 15px; border-radius: 8px; white-space: pre-wrap; }
+    button { background: #00d9ff; color: #1a1a2e; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Debug: FIT Shader Features</h1>
+  <button onclick="runTests()">Run Tests</button>
+  <pre id="output">Click to run...</pre>
+
+  <script type="module">
+    const log = (msg) => { document.getElementById('output').textContent += msg + '\n'; };
+
+    // Test 1: Using workgroup_id instead of global_invocation_id
+    const SHADER_WORKGROUP_ID = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> sm: array<f32, 256>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        sm[tid] = f32(tid) + 100.0;
+        workgroupBarrier();
+        output[tid] = sm[tid];
+      }
+    `;
+
+    // Test 2: Double barrier in loop
+    const SHADER_DOUBLE_BARRIER = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> sm: array<f32, 256>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+
+        var acc: f32 = 0.0;
+        for (var t: u32 = 0u; t < 2u; t = t + 1u) {
+          sm[tid] = f32(g) + f32(t) * 100.0;
+          workgroupBarrier();
+          acc = acc + sm[tid];
+          workgroupBarrier();
+        }
+        output[g] = acc;
+      }
+    `;
+
+    // Test 3: Two shared arrays
+    const SHADER_TWO_ARRAYS = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> As: array<f32, 256>;
+      var<workgroup> Bs: array<f32, 256>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+
+        As[tid] = f32(g) + 100.0;
+        Bs[tid] = f32(g) + 200.0;
+        workgroupBarrier();
+        output[g] = As[tid] + Bs[tid];
+      }
+    `;
+
+    // Test 4: vec4 storage type
+    const SHADER_VEC4_STORAGE = `
+      @group(0) @binding(0) var<storage, read_write> output: array<vec4<f32>>;
+      var<workgroup> sm: array<vec4<f32>, 64>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+        let vecIdx = tid / 4u;
+
+        sm[vecIdx] = vec4<f32>(f32(g) + 100.0);
+        workgroupBarrier();
+        output[g / 4u] = sm[vecIdx];
+      }
+    `;
+
+    // Test 5: Large shared + double barrier (like FIT)
+    const SHADER_LARGE_DOUBLE = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> As: array<f32, 2080>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+
+        var acc: f32 = 0.0;
+        for (var t: u32 = 0u; t < 2u; t = t + 1u) {
+          As[tid] = f32(tid) + f32(t) * 100.0;
+          workgroupBarrier();
+          acc = acc + As[tid];
+          workgroupBarrier();
+        }
+        output[tid] = acc;
+      }
+    `;
+
+    // Test 6: Both arrays, large, double barrier, vec4
+    const SHADER_FULL_COMBO = `
+      @group(0) @binding(0) var<storage, read_write> output: array<vec4<f32>>;
+      var<workgroup> As: array<f32, 2080>;
+      var<workgroup> Bs: array<vec4<f32>, 544>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let vecIdx = tid;
+
+        var acc: vec4<f32> = vec4<f32>(0.0);
+
+        for (var t: u32 = 0u; t < 2u; t = t + 1u) {
+          As[tid] = f32(tid) + f32(t) * 100.0;
+          Bs[tid] = vec4<f32>(f32(tid) + f32(t) * 200.0);
+          workgroupBarrier();
+          acc = acc + vec4<f32>(As[tid]) + Bs[tid];
+          workgroupBarrier();
+        }
+        output[vecIdx] = acc;
+      }
+    `;
+
+    async function runShader(name, code, device, outputIsVec4 = false) {
+      const outSize = outputIsVec4 ? 256 * 16 : 256 * 4;
+      const outBuffer = device.createBuffer({
+        size: outSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+
+      const module = device.createShaderModule({ code });
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'main' },
+      });
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: outBuffer } }],
+      });
+
+      const commandEncoder = device.createCommandEncoder();
+      const pass = commandEncoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(1, 1);
+      pass.end();
+
+      const staging = device.createBuffer({
+        size: outSize,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      commandEncoder.copyBufferToBuffer(outBuffer, 0, staging, 0, outSize);
+      device.queue.submit([commandEncoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const result = new Float32Array(staging.getMappedRange().slice(0));
+      staging.unmap();
+      outBuffer.destroy();
+      staging.destroy();
+
+      const first5 = Array.from(result.slice(0, 5));
+      const hasNonZero = first5.some(v => v !== 0);
+      log(`${name}: [${first5.map(v => v.toFixed(0)).join(', ')}] - ${hasNonZero ? 'PASS' : 'FAIL'}`);
+    }
+
+    window.runTests = async function() {
+      document.getElementById('output').textContent = '';
+      log('Initializing WebGPU...');
+
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+      log('WebGPU initialized\n');
+
+      log('=== Testing FIT Shader Features ===\n');
+
+      await runShader('workgroup_id (not global)', SHADER_WORKGROUP_ID, device);
+      await runShader('Double barrier in loop', SHADER_DOUBLE_BARRIER, device);
+      await runShader('Two shared arrays', SHADER_TWO_ARRAYS, device);
+      await runShader('vec4 storage type', SHADER_VEC4_STORAGE, device, true);
+      await runShader('Large shared + double barrier', SHADER_LARGE_DOUBLE, device);
+      await runShader('Full combo (all features)', SHADER_FULL_COMBO, device, true);
+
+      log('\n=== Done ===');
+    };
+  </script>
+</body>
+</html>

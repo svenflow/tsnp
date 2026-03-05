@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Debug: Value Written to Shared Memory</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+    pre { background: #16213e; padding: 15px; border-radius: 8px; white-space: pre-wrap; }
+    button { background: #00d9ff; color: #1a1a2e; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Debug: Value Written to Shared Memory Bug</h1>
+  <p>Testing: Does the VALUE written to shared affect whether output works?</p>
+  <button onclick="runTests()">Run Tests</button>
+  <pre id="output">Click to run...</pre>
+
+  <script type="module">
+    let device = null;
+    const log = (msg) => { document.getElementById('output').textContent += msg + '\n'; };
+
+    async function init() {
+      const adapter = await navigator.gpu.requestAdapter();
+      device = await adapter.requestDevice();
+    }
+
+    // Write f32(g) + 100.0 (WORKS)
+    const SHADER_G = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> shared: array<f32, 256>;
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+        shared[tid] = f32(g) + 100.0;
+        workgroupBarrier();
+        let neighbor = (tid + 1u) % 256u;
+        output[g] = shared[neighbor];
+      }
+    `;
+
+    // Write f32(tid) + 100.0 (FAILS)
+    const SHADER_TID = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> shared: array<f32, 256>;
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+        shared[tid] = f32(tid) + 100.0;
+        workgroupBarrier();
+        let neighbor = (tid + 1u) % 256u;
+        output[g] = shared[neighbor];
+      }
+    `;
+
+    // Write constant 999.0
+    const SHADER_CONST = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> shared: array<f32, 256>;
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+        shared[tid] = 999.0;
+        workgroupBarrier();
+        let neighbor = (tid + 1u) % 256u;
+        output[g] = shared[neighbor];
+      }
+    `;
+
+    // Write lid.x
+    const SHADER_LIDX = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> shared: array<f32, 256>;
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+        shared[tid] = f32(lid.x) + 100.0;
+        workgroupBarrier();
+        let neighbor = (tid + 1u) % 256u;
+        output[g] = shared[neighbor];
+      }
+    `;
+
+    // Write gid.x
+    const SHADER_GIDX = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> shared: array<f32, 256>;
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+        shared[tid] = f32(gid.x) + 100.0;
+        workgroupBarrier();
+        let neighbor = (tid + 1u) % 256u;
+        output[g] = shared[neighbor];
+      }
+    `;
+
+    // Write f32(lid.y * 16u + lid.x) - same as tid but inline
+    const SHADER_INLINE_TID = `
+      @group(0) @binding(0) var<storage, read_write> output: array<f32>;
+      var<workgroup> shared: array<f32, 256>;
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(global_invocation_id) gid: vec3<u32>) {
+        let tid = lid.y * 16u + lid.x;
+        let g = gid.y * 16u + gid.x;
+        shared[tid] = f32(lid.y * 16u + lid.x) + 100.0;
+        workgroupBarrier();
+        let neighbor = (tid + 1u) % 256u;
+        output[g] = shared[neighbor];
+      }
+    `;
+
+    async function runShader(name, code) {
+      const outBuffer = device.createBuffer({
+        size: 256 * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+
+      const module = device.createShaderModule({ code });
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'main' },
+      });
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: outBuffer } }],
+      });
+
+      const commandEncoder = device.createCommandEncoder();
+      const pass = commandEncoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(1, 1);
+      pass.end();
+
+      const staging = device.createBuffer({
+        size: 256 * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      commandEncoder.copyBufferToBuffer(outBuffer, 0, staging, 0, 256 * 4);
+      device.queue.submit([commandEncoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const result = new Float32Array(staging.getMappedRange().slice(0));
+      staging.unmap();
+      outBuffer.destroy();
+      staging.destroy();
+
+      const first10 = Array.from(result.slice(0, 10));
+      const hasNonZero = first10.some(v => v !== 0);
+      log(`${name}: [${first10.map(v => v.toFixed(0)).join(', ')}] - ${hasNonZero ? 'PASS' : 'FAIL'}`);
+    }
+
+    window.runTests = async function() {
+      document.getElementById('output').textContent = '';
+      await init();
+      log('WebGPU initialized\n');
+
+      await runShader('Write f32(g) + 100', SHADER_G);
+      await runShader('Write f32(tid) + 100', SHADER_TID);
+      await runShader('Write constant 999', SHADER_CONST);
+      await runShader('Write f32(lid.x) + 100', SHADER_LIDX);
+      await runShader('Write f32(gid.x) + 100', SHADER_GIDX);
+      await runShader('Write f32(lid.y*16+lid.x) inline', SHADER_INLINE_TID);
+    };
+  </script>
+</body>
+</html>

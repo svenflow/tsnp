@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Debug: Simplified FIT Pattern</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+    pre { background: #16213e; padding: 15px; border-radius: 8px; white-space: pre-wrap; }
+    button { background: #00d9ff; color: #1a1a2e; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Debug: Simplified FIT Pattern</h1>
+  <button onclick="runTest()">Run Test</button>
+  <pre id="output">Click to run...</pre>
+
+  <script type="module">
+    const log = (msg) => { document.getElementById('output').textContent += msg + '\n'; };
+
+    // Simplified version of FIT shader - just loads A and writes it back
+    const SHADER_LOAD_ONLY = `
+      struct Uniforms { M: u32, K: u32, N: u32, NPadded: u32, }
+      const BLOCK_M: u32 = 64u;
+      const BLOCK_K: u32 = 32u;
+      const BLOCK_M_PADDED: u32 = 65u;
+
+      @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+      @group(0) @binding(1) var<storage, read> A: array<f32>;
+      @group(0) @binding(2) var<storage, read_write> C: array<f32>;
+      var<workgroup> As: array<f32, 2080>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+        let K = uniforms.K;
+        let tx = lid.x;
+        let ty = lid.y;
+        let tid = ty * 16u + tx;
+
+        // Load first tile of A into shared memory
+        for (var i: u32 = 0u; i < 8u; i = i + 1u) {
+          let loadIdx = tid * 8u + i;
+          let loadK = loadIdx / BLOCK_M;
+          let loadRow = loadIdx % BLOCK_M;
+          let globalK = loadK;  // t=0, so just loadK
+          let globalRow = wid.y * BLOCK_M + loadRow;
+          As[loadK * BLOCK_M_PADDED + loadRow] = A[globalRow * K + globalK];
+        }
+        workgroupBarrier();
+
+        // Read from shared memory and write to output
+        let outRow = wid.y * BLOCK_M + ty * 4u;
+        let outCol = wid.x * 64u + tx;
+        let aRowBase = ty * 4u;
+
+        // Just copy first column of loaded tile
+        C[outRow * uniforms.N + outCol] = As[0u * BLOCK_M_PADDED + aRowBase];
+      }
+    `;
+
+    // Even simpler - just check if we can write anything
+    const SHADER_WRITE_ONLY = `
+      struct Uniforms { M: u32, K: u32, N: u32, NPadded: u32, }
+
+      @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+      @group(0) @binding(1) var<storage, read> A: array<f32>;
+      @group(0) @binding(2) var<storage, read_write> C: array<f32>;
+      var<workgroup> As: array<f32, 2080>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+        let tx = lid.x;
+        let ty = lid.y;
+        let outIdx = ty * 16u + tx;
+
+        // Just write something to shared memory
+        As[outIdx] = 999.0;
+        workgroupBarrier();
+
+        // Write to output
+        C[outIdx] = As[outIdx];
+      }
+    `;
+
+    // No shared memory at all
+    const SHADER_NO_SHARED = `
+      struct Uniforms { M: u32, K: u32, N: u32, NPadded: u32, }
+
+      @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+      @group(0) @binding(1) var<storage, read> A: array<f32>;
+      @group(0) @binding(2) var<storage, read_write> C: array<f32>;
+
+      @compute @workgroup_size(16, 16)
+      fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+        let tx = lid.x;
+        let ty = lid.y;
+        let outIdx = ty * 16u + tx;
+
+        C[outIdx] = A[outIdx] + 1.0;
+      }
+    `;
+
+    async function runShader(name, code, device) {
+      const M = 64, K = 64, N = 64;
+
+      const uniformBuffer = device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      device.queue.writeBuffer(uniformBuffer, 0, new Uint32Array([M, K, N, N]));
+
+      const aData = new Float32Array(M * K);
+      for (let i = 0; i < M * K; i++) aData[i] = (i % 17) * 0.1;
+      const aBuffer = device.createBuffer({
+        size: aData.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      device.queue.writeBuffer(aBuffer, 0, aData);
+
+      const cBuffer = device.createBuffer({
+        size: M * N * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      });
+
+      const module = device.createShaderModule({ code });
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'main' },
+      });
+
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: { buffer: aBuffer } },
+          { binding: 2, resource: { buffer: cBuffer } },
+        ],
+      });
+
+      const commandEncoder = device.createCommandEncoder();
+      const pass = commandEncoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(1, 1);
+      pass.end();
+
+      const staging = device.createBuffer({
+        size: M * N * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      commandEncoder.copyBufferToBuffer(cBuffer, 0, staging, 0, M * N * 4);
+      device.queue.submit([commandEncoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const result = new Float32Array(staging.getMappedRange().slice(0));
+      staging.unmap();
+
+      uniformBuffer.destroy();
+      aBuffer.destroy();
+      cBuffer.destroy();
+      staging.destroy();
+
+      const first5 = Array.from(result.slice(0, 5));
+      const hasNonZero = first5.some(v => v !== 0);
+      log(`${name}: [${first5.map(v => v.toFixed(1)).join(', ')}] - ${hasNonZero ? 'PASS' : 'FAIL'}`);
+    }
+
+    window.runTest = async function() {
+      document.getElementById('output').textContent = '';
+      log('Initializing WebGPU...');
+
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+      log('WebGPU initialized\n');
+
+      await runShader('No shared memory', SHADER_NO_SHARED, device);
+      await runShader('Write shared, read back', SHADER_WRITE_ONLY, device);
+      await runShader('Load A to shared', SHADER_LOAD_ONLY, device);
+
+      log('\n=== Done ===');
+    };
+  </script>
+</body>
+</html>
