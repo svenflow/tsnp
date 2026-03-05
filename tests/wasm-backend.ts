@@ -235,80 +235,42 @@ export class WasmBackend implements Backend {
   // ============ Math - Decomposition ============
 
   modf(arr: IFaceNDArray): { frac: IFaceNDArray; integ: IFaceNDArray } {
-    const frac = new Float64Array(arr.data.length);
-    const integ = new Float64Array(arr.data.length);
-    for (let i = 0; i < arr.data.length; i++) {
-      const x = arr.data[i];
-      integ[i] = Math.trunc(x);
-      frac[i] = x - integ[i];
-    }
+    const result = this.wasm.modfArr(this.unwrap(arr));
     return {
-      frac: this.array(Array.from(frac), arr.shape),
-      integ: this.array(Array.from(integ), arr.shape),
+      frac: this.wrap(result[0]),
+      integ: this.wrap(result[1]),
     };
   }
 
   frexp(arr: IFaceNDArray): { mantissa: IFaceNDArray; exponent: IFaceNDArray } {
-    const mantissa = new Float64Array(arr.data.length);
-    const exponent = new Float64Array(arr.data.length);
-    for (let i = 0; i < arr.data.length; i++) {
-      const x = arr.data[i];
-      if (x === 0 || !Number.isFinite(x) || Number.isNaN(x)) {
-        mantissa[i] = x;
-        exponent[i] = 0;
-      } else {
-        const exp = Math.floor(Math.log2(Math.abs(x))) + 1;
-        mantissa[i] = x / Math.pow(2, exp);
-        exponent[i] = exp;
-      }
-    }
+    const result = this.wasm.frexpArr(this.unwrap(arr));
     return {
-      mantissa: this.array(Array.from(mantissa), arr.shape),
-      exponent: this.array(Array.from(exponent), arr.shape),
+      mantissa: this.wrap(result[0]),
+      exponent: this.wrap(result[1]),
     };
   }
 
   ldexp(arr: IFaceNDArray, exp: IFaceNDArray): IFaceNDArray {
-    if (arr.data.length !== exp.data.length) {
-      throw new Error('Arrays must have the same length');
-    }
-    const result = new Float64Array(arr.data.length);
-    for (let i = 0; i < arr.data.length; i++) {
-      result[i] = arr.data[i] * Math.pow(2, exp.data[i]);
-    }
-    return this.array(Array.from(result), arr.shape);
+    return this.wrap(this.wasm.ldexpArr(this.unwrap(arr), this.unwrap(exp)));
   }
 
   divmod(a: IFaceNDArray, b: IFaceNDArray): { quotient: IFaceNDArray; remainder: IFaceNDArray } {
-    if (a.data.length !== b.data.length) {
-      throw new Error('Arrays must have the same length');
-    }
-    const quotient = new Float64Array(a.data.length);
-    const remainder = new Float64Array(a.data.length);
-    for (let i = 0; i < a.data.length; i++) {
-      quotient[i] = Math.floor(a.data[i] / b.data[i]);
-      // Python-style modulo
-      const r = a.data[i] % b.data[i];
-      remainder[i] = r !== 0 && Math.sign(r) !== Math.sign(b.data[i]) ? r + b.data[i] : r;
-    }
+    const result = this.wasm.divmodArr(this.unwrap(a), this.unwrap(b));
     return {
-      quotient: this.array(Array.from(quotient), a.shape),
-      remainder: this.array(Array.from(remainder), a.shape),
+      quotient: this.wrap(result[0]),
+      remainder: this.wrap(result[1]),
     };
   }
 
   // ============ Math - Binary (Extended) ============
 
   mod(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
-    const result = new Float64Array(a.data.length);
-    for (let i = 0; i < a.data.length; i++) {
-      const r = a.data[i] % b.data[i];
-      result[i] = r !== 0 && Math.sign(r) !== Math.sign(b.data[i]) ? r + b.data[i] : r;
-    }
-    return this.array(Array.from(result), a.shape);
+    return this.wrap(this.wasm.modArr(this.unwrap(a), this.unwrap(b)));
   }
 
   fmod(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
+    // C-style fmod: result has same sign as dividend (a)
+    // This is different from Python-style mod (divisor sign)
     const result = new Float64Array(a.data.length);
     for (let i = 0; i < a.data.length; i++) {
       result[i] = a.data[i] % b.data[i];
@@ -321,24 +283,11 @@ export class WasmBackend implements Backend {
   }
 
   copysign(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
-    // Copy sign of b to magnitude of a
-    // NumPy: copysign(5, -0) = -5, copysign(5, +0) = 5
-    const result = new Float64Array(a.data.length);
-    for (let i = 0; i < a.data.length; i++) {
-      const magnitude = Math.abs(a.data[i]);
-      // Use Object.is to detect -0, since Math.sign(0) = 0 and Math.sign(-0) = -0
-      const bNegative = b.data[i] < 0 || Object.is(b.data[i], -0);
-      result[i] = bNegative ? -magnitude : magnitude;
-    }
-    return this.array(Array.from(result), a.shape);
+    return this.wrap(this.wasm.copysignArr(this.unwrap(a), this.unwrap(b)));
   }
 
   hypot(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
-    const result = new Float64Array(a.data.length);
-    for (let i = 0; i < a.data.length; i++) {
-      result[i] = Math.hypot(a.data[i], b.data[i]);
-    }
-    return this.array(Array.from(result), a.shape);
+    return this.wrap(this.wasm.hypotArr(this.unwrap(a), this.unwrap(b)));
   }
 
   arctan2(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
@@ -501,72 +450,39 @@ export class WasmBackend implements Backend {
   }
 
   equal(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
-    this._checkSameShape(a, b);
-    const data = new Float64Array(a.data.length);
-    for (let i = 0; i < a.data.length; i++) {
-      data[i] = a.data[i] === b.data[i] ? 1 : 0;
-    }
-    return this.array(Array.from(data), a.shape);
+    return this.wrap(this.unwrap(a).eq(this.unwrap(b)));
   }
 
   notEqual(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
-    this._checkSameShape(a, b);
-    const data = new Float64Array(a.data.length);
-    for (let i = 0; i < a.data.length; i++) {
-      data[i] = a.data[i] !== b.data[i] ? 1 : 0;
-    }
-    return this.array(Array.from(data), a.shape);
+    return this.wrap(this.unwrap(a).ne(this.unwrap(b)));
   }
 
   less(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
-    this._checkSameShape(a, b);
-    const data = new Float64Array(a.data.length);
-    for (let i = 0; i < a.data.length; i++) {
-      data[i] = a.data[i] < b.data[i] ? 1 : 0;
-    }
-    return this.array(Array.from(data), a.shape);
+    return this.wrap(this.unwrap(a).lt(this.unwrap(b)));
   }
 
   lessEqual(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
-    this._checkSameShape(a, b);
-    const data = new Float64Array(a.data.length);
-    for (let i = 0; i < a.data.length; i++) {
-      data[i] = a.data[i] <= b.data[i] ? 1 : 0;
-    }
-    return this.array(Array.from(data), a.shape);
+    return this.wrap(this.unwrap(a).le(this.unwrap(b)));
   }
 
   greater(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
-    this._checkSameShape(a, b);
-    const data = new Float64Array(a.data.length);
-    for (let i = 0; i < a.data.length; i++) {
-      data[i] = a.data[i] > b.data[i] ? 1 : 0;
-    }
-    return this.array(Array.from(data), a.shape);
+    return this.wrap(this.unwrap(a).gt(this.unwrap(b)));
   }
 
   greaterEqual(a: IFaceNDArray, b: IFaceNDArray): IFaceNDArray {
-    this._checkSameShape(a, b);
-    const data = new Float64Array(a.data.length);
-    for (let i = 0; i < a.data.length; i++) {
-      data[i] = a.data[i] >= b.data[i] ? 1 : 0;
-    }
-    return this.array(Array.from(data), a.shape);
+    return this.wrap(this.unwrap(a).ge(this.unwrap(b)));
   }
 
   isnan(arr: IFaceNDArray): IFaceNDArray {
-    const data = arr.data.map(x => Number.isNaN(x) ? 1 : 0);
-    return this.array(Array.from(data), arr.shape);
+    return this.wrap(this.unwrap(arr).isNan());
   }
 
   isinf(arr: IFaceNDArray): IFaceNDArray {
-    const data = arr.data.map(x => !Number.isFinite(x) && !Number.isNaN(x) ? 1 : 0);
-    return this.array(Array.from(data), arr.shape);
+    return this.wrap(this.unwrap(arr).isInf());
   }
 
   isfinite(arr: IFaceNDArray): IFaceNDArray {
-    const data = arr.data.map(x => Number.isFinite(x) ? 1 : 0);
-    return this.array(Array.from(data), arr.shape);
+    return this.wrap(this.unwrap(arr).isFinite());
   }
 
   // ============ Set Operations ============
@@ -809,224 +725,23 @@ export class WasmBackend implements Backend {
   }
 
   norm(arr: IFaceNDArray, ord: number = 2): number {
-    const flat = this.flatten(arr).data;
-    if (ord === Infinity) {
-      // L-infinity norm: max of absolute values
-      let max = 0;
-      for (let i = 0; i < flat.length; i++) {
-        max = Math.max(max, Math.abs(flat[i]));
-      }
-      return max;
-    } else if (ord === -Infinity) {
-      // min of absolute values
-      let min = Infinity;
-      for (let i = 0; i < flat.length; i++) {
-        min = Math.min(min, Math.abs(flat[i]));
-      }
-      return min;
-    } else if (ord === 1) {
-      // L1 norm: sum of absolute values
-      let sum = 0;
-      for (let i = 0; i < flat.length; i++) {
-        sum += Math.abs(flat[i]);
-      }
-      return sum;
-    } else {
-      // General Lp norm: (sum |x_i|^p)^(1/p)
-      let sum = 0;
-      for (let i = 0; i < flat.length; i++) {
-        sum += Math.pow(Math.abs(flat[i]), ord);
-      }
-      return Math.pow(sum, 1 / ord);
-    }
+    return this.wasm.norm(this.unwrap(arr), ord);
   }
 
   qr(arr: IFaceNDArray): { q: IFaceNDArray; r: IFaceNDArray } {
-    // Modified Gram-Schmidt QR decomposition
-    if (arr.shape.length !== 2) throw new Error('qr requires 2D array');
-    const [m, n] = arr.shape;
-    const k = Math.min(m, n);
-
-    // Copy input to Q
-    const q = new Float64Array(m * n);
-    for (let i = 0; i < m * n; i++) q[i] = arr.data[i];
-
-    const r = new Float64Array(k * n);
-
-    for (let col = 0; col < k; col++) {
-      // Compute norm of column
-      let normSquared = 0;
-      for (let i = 0; i < m; i++) {
-        normSquared += q[i * n + col] ** 2;
-      }
-      const colNorm = Math.sqrt(normSquared);
-      r[col * n + col] = colNorm;
-
-      // Normalize column
-      if (colNorm > 1e-14) {
-        for (let i = 0; i < m; i++) {
-          q[i * n + col] /= colNorm;
-        }
-      }
-
-      // Orthogonalize remaining columns
-      for (let j = col + 1; j < n; j++) {
-        let dot = 0;
-        for (let i = 0; i < m; i++) {
-          dot += q[i * n + col] * q[i * n + j];
-        }
-        r[col * n + j] = dot;
-        for (let i = 0; i < m; i++) {
-          q[i * n + j] -= dot * q[i * n + col];
-        }
-      }
-    }
-
+    const result = this.wasm.qr(this.unwrap(arr));
     return {
-      q: this.array(Array.from(q), [m, n]),
-      r: this.array(Array.from(r), [k, n]),
+      q: this.wrap(result[0]),
+      r: this.wrap(result[1]),
     };
   }
 
   svd(arr: IFaceNDArray): { u: IFaceNDArray; s: IFaceNDArray; vt: IFaceNDArray } {
-    // SVD via power iteration on A^T A
-    // A = U * S * V^T, where A^T A = V * S^2 * V^T
-    if (arr.shape.length !== 2) throw new Error('svd requires 2D array');
-    const [m, n] = arr.shape;
-    const k = Math.min(m, n);
-
-    // Compute A^T A
-    const at = this.transpose(arr);
-    const ata = this.matmul(at, arr);
-    const ataData = ata.data;
-
-    // Power iteration with deflation
-    const singularValues = new Float64Array(k);
-    const vMatrix = new Float64Array(n * k);
-
-    // Working copy for deflation
-    const ataWork = new Float64Array(n * n);
-    for (let i = 0; i < n * n; i++) ataWork[i] = ataData[i];
-
-    const MAX_ITER = 100;
-    const TOL = 1e-10;
-
-    for (let svIdx = 0; svIdx < k; svIdx++) {
-      // Initialize random vector
-      const v = new Float64Array(n);
-      for (let j = 0; j < n; j++) v[j] = Math.random() - 0.5;
-
-      // Orthogonalize against previous eigenvectors
-      for (let prevIdx = 0; prevIdx < svIdx; prevIdx++) {
-        let dot = 0;
-        for (let j = 0; j < n; j++) {
-          dot += v[j] * vMatrix[j * k + prevIdx];
-        }
-        for (let j = 0; j < n; j++) {
-          v[j] -= dot * vMatrix[j * k + prevIdx];
-        }
-      }
-
-      // Normalize
-      let vNorm = Math.sqrt(v.reduce((acc, x) => acc + x * x, 0));
-      if (vNorm > 1e-10) {
-        for (let j = 0; j < n; j++) v[j] /= vNorm;
-      }
-
-      // Power iteration
-      let eigenvalue = 0;
-      for (let iter = 0; iter < MAX_ITER; iter++) {
-        // v_new = A^T A * v
-        const vNew = new Float64Array(n);
-        for (let i = 0; i < n; i++) {
-          for (let j = 0; j < n; j++) {
-            vNew[i] += ataWork[i * n + j] * v[j];
-          }
-        }
-
-        // Normalize
-        vNorm = Math.sqrt(vNew.reduce((acc, x) => acc + x * x, 0));
-        const prevEigenvalue = eigenvalue;
-        eigenvalue = vNorm;
-
-        if (vNorm > 1e-10) {
-          for (let j = 0; j < n; j++) v[j] = vNew[j] / vNorm;
-        }
-
-        // Re-orthogonalize
-        for (let prevIdx = 0; prevIdx < svIdx; prevIdx++) {
-          let dot = 0;
-          for (let j = 0; j < n; j++) {
-            dot += v[j] * vMatrix[j * k + prevIdx];
-          }
-          for (let j = 0; j < n; j++) {
-            v[j] -= dot * vMatrix[j * k + prevIdx];
-          }
-        }
-        vNorm = Math.sqrt(v.reduce((acc, x) => acc + x * x, 0));
-        if (vNorm > 1e-10) {
-          for (let j = 0; j < n; j++) v[j] /= vNorm;
-        }
-
-        // Check convergence
-        if (Math.abs(eigenvalue - prevEigenvalue) < TOL) break;
-      }
-
-      // Store singular value and V column
-      singularValues[svIdx] = Math.sqrt(Math.abs(eigenvalue));
-      for (let j = 0; j < n; j++) {
-        vMatrix[j * k + svIdx] = v[j];
-      }
-
-      // Deflate: A^T A -= eigenvalue * v * v^T
-      for (let i = 0; i < n; i++) {
-        for (let j = 0; j < n; j++) {
-          ataWork[i * n + j] -= eigenvalue * v[i] * v[j];
-        }
-      }
-    }
-
-    // Sort by singular value (descending)
-    const indices = Array.from({ length: k }, (_, i) => i);
-    indices.sort((a, b) => singularValues[b] - singularValues[a]);
-
-    const sortedS = new Float64Array(k);
-    const sortedV = new Float64Array(n * k);
-    for (let i = 0; i < k; i++) {
-      sortedS[i] = singularValues[indices[i]];
-      for (let j = 0; j < n; j++) {
-        sortedV[j * k + i] = vMatrix[j * k + indices[i]];
-      }
-    }
-
-    // Compute U = A * V * S^(-1)
-    const vArr = this.array(Array.from(sortedV), [n, k]);
-    const av = this.matmul(arr, vArr);
-    const avData = av.data;
-
-    // Scale by 1/sigma
-    const uData = new Float64Array(m * k);
-    for (let j = 0; j < k; j++) {
-      const sigma = sortedS[j];
-      if (sigma > 1e-10) {
-        for (let i = 0; i < m; i++) {
-          uData[i * k + j] = avData[i * k + j] / sigma;
-        }
-      }
-    }
-
-    // V^T is k x n
-    const vtData = new Float64Array(k * n);
-    for (let i = 0; i < k; i++) {
-      for (let j = 0; j < n; j++) {
-        vtData[i * n + j] = sortedV[j * k + i];
-      }
-    }
-
+    const result = this.wasm.svd(this.unwrap(arr));
     return {
-      u: this.array(Array.from(uData), [m, k]),
-      s: this.array(Array.from(sortedS), [k]),
-      vt: this.array(Array.from(vtData), [k, n]),
+      u: this.wrap(result[0]),
+      s: this.wrap(result[1]),
+      vt: this.wrap(result[2]),
     };
   }
 
@@ -2658,33 +2373,11 @@ export class WasmBackend implements Backend {
   }
 
   logspace(start: number, stop: number, num: number, base: number = 10): IFaceNDArray {
-    const linear = this.linspace(start, stop, num);
-    const result = new Float64Array(num);
-    for (let i = 0; i < num; i++) {
-      result[i] = Math.pow(base, linear.data[i]);
-    }
-    return this.array(Array.from(result), [num]);
+    return this.wrap(this.wasm.logspaceArr(start, stop, num, base));
   }
 
   geomspace(start: number, stop: number, num: number): IFaceNDArray {
-    if (start === 0 || stop === 0) {
-      throw new Error('geomspace: start and stop must be non-zero');
-    }
-    if ((start < 0) !== (stop < 0)) {
-      throw new Error('geomspace: start and stop must have same sign');
-    }
-
-    const logStart = Math.log(Math.abs(start));
-    const logStop = Math.log(Math.abs(stop));
-    const linear = this.linspace(logStart, logStop, num);
-    const result = new Float64Array(num);
-    const sign = start < 0 ? -1 : 1;
-
-    for (let i = 0; i < num; i++) {
-      result[i] = sign * Math.exp(linear.data[i]);
-    }
-
-    return this.array(Array.from(result), [num]);
+    return this.wrap(this.wasm.geomspaceArr(start, stop, num));
   }
 
   // ============ Stacking Shortcuts ============

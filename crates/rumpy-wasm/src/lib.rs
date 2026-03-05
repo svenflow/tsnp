@@ -5483,3 +5483,237 @@ fn bilinear_interpolate_2d(
 
     output
 }
+
+// ============ Decomposition operations (NumPy parity) ============
+
+/// Decompose array into fractional and integral parts
+///
+/// Returns two arrays: fractional parts and integral parts.
+/// Equivalent to numpy.modf(x).
+#[wasm_bindgen(js_name = modfArr)]
+pub fn modf_arr(arr: &NDArray) -> js_sys::Array {
+    let data = arr.inner.as_ndarray();
+    let frac = data.mapv(|x| x.fract());
+    let integ = data.mapv(|x| x.trunc());
+
+    let result = js_sys::Array::new();
+    result.push(&JsValue::from(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(frac))));
+    result.push(&JsValue::from(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(integ))));
+    result
+}
+
+/// Decompose array into mantissa and exponent (base 2)
+///
+/// Returns two arrays: mantissa and exponent where x = mantissa * 2^exponent.
+/// Equivalent to numpy.frexp(x).
+#[wasm_bindgen(js_name = frexpArr)]
+pub fn frexp_arr(arr: &NDArray) -> js_sys::Array {
+    let data = arr.inner.as_ndarray();
+
+    let mantissa = data.mapv(|x| {
+        if x == 0.0 || x.is_nan() || x.is_infinite() {
+            x
+        } else {
+            let exp = x.abs().log2().floor() + 1.0;
+            x / 2_f64.powf(exp)
+        }
+    });
+
+    let exponent = data.mapv(|x| {
+        if x == 0.0 {
+            0.0
+        } else if x.is_nan() || x.is_infinite() {
+            f64::NAN
+        } else {
+            x.abs().log2().floor() + 1.0
+        }
+    });
+
+    let result = js_sys::Array::new();
+    result.push(&JsValue::from(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(mantissa))));
+    result.push(&JsValue::from(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(exponent))));
+    result
+}
+
+/// Compute x * 2^exp element-wise
+///
+/// Equivalent to numpy.ldexp(x, exp).
+#[wasm_bindgen(js_name = ldexpArr)]
+pub fn ldexp_arr(arr: &NDArray, exp: &NDArray) -> Result<NDArray, JsValue> {
+    let arr_data = arr.inner.as_ndarray();
+    let exp_data = exp.inner.as_ndarray();
+
+    if arr_data.shape() != exp_data.shape() {
+        return Err(JsValue::from_str(&format!(
+            "shapes {:?} and {:?} must match for ldexp",
+            arr_data.shape(), exp_data.shape()
+        )));
+    }
+
+    let result = ndarray::Zip::from(&*arr_data)
+        .and(&*exp_data)
+        .map_collect(|&x, &e| x * 2_f64.powf(e));
+    Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+}
+
+/// Compute floor division and remainder simultaneously
+///
+/// Returns two arrays: quotient (floor division) and remainder.
+/// Equivalent to numpy.divmod(a, b).
+#[wasm_bindgen(js_name = divmodArr)]
+pub fn divmod_arr(a: &NDArray, b: &NDArray) -> Result<js_sys::Array, JsValue> {
+    let a_data = a.inner.as_ndarray();
+    let b_data = b.inner.as_ndarray();
+
+    if a_data.shape() != b_data.shape() {
+        return Err(JsValue::from_str(&format!(
+            "shapes {:?} and {:?} must match for divmod",
+            a_data.shape(), b_data.shape()
+        )));
+    }
+
+    let quotient = ndarray::Zip::from(&*a_data)
+        .and(&*b_data)
+        .map_collect(|&av, &bv| (av / bv).floor());
+
+    let remainder = ndarray::Zip::from(&*a_data)
+        .and(&*b_data)
+        .map_collect(|&av, &bv| {
+            // Python-style modulo: result has same sign as divisor
+            let r = av % bv;
+            if (r > 0.0 && bv < 0.0) || (r < 0.0 && bv > 0.0) {
+                r + bv
+            } else {
+                r
+            }
+        });
+
+    let result = js_sys::Array::new();
+    result.push(&JsValue::from(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(quotient))));
+    result.push(&JsValue::from(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(remainder))));
+    Ok(result)
+}
+
+/// Python-style modulo (remainder has same sign as divisor)
+///
+/// Equivalent to numpy.mod(a, b) or a % b in Python.
+#[wasm_bindgen(js_name = modArr)]
+pub fn mod_arr(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
+    let a_data = a.inner.as_ndarray();
+    let b_data = b.inner.as_ndarray();
+
+    if a_data.shape() != b_data.shape() {
+        return Err(JsValue::from_str(&format!(
+            "shapes {:?} and {:?} must match for mod",
+            a_data.shape(), b_data.shape()
+        )));
+    }
+
+    let result = ndarray::Zip::from(&*a_data)
+        .and(&*b_data)
+        .map_collect(|&av, &bv| {
+            // Python-style modulo: result has same sign as divisor
+            let r = av % bv;
+            if (r > 0.0 && bv < 0.0) || (r < 0.0 && bv > 0.0) {
+                r + bv
+            } else {
+                r
+            }
+        });
+    Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+}
+
+/// Copy sign of b to magnitude of a
+///
+/// Equivalent to numpy.copysign(a, b).
+#[wasm_bindgen(js_name = copysignArr)]
+pub fn copysign_arr(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
+    let a_data = a.inner.as_ndarray();
+    let b_data = b.inner.as_ndarray();
+
+    if a_data.shape() != b_data.shape() {
+        return Err(JsValue::from_str(&format!(
+            "shapes {:?} and {:?} must match for copysign",
+            a_data.shape(), b_data.shape()
+        )));
+    }
+
+    let result = ndarray::Zip::from(&*a_data)
+        .and(&*b_data)
+        .map_collect(|&av, &bv| av.abs().copysign(bv));
+    Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+}
+
+/// Compute hypotenuse: sqrt(a^2 + b^2) avoiding overflow
+///
+/// Equivalent to numpy.hypot(a, b).
+#[wasm_bindgen(js_name = hypotArr)]
+pub fn hypot_arr(a: &NDArray, b: &NDArray) -> Result<NDArray, JsValue> {
+    let a_data = a.inner.as_ndarray();
+    let b_data = b.inner.as_ndarray();
+
+    if a_data.shape() != b_data.shape() {
+        return Err(JsValue::from_str(&format!(
+            "shapes {:?} and {:?} must match for hypot",
+            a_data.shape(), b_data.shape()
+        )));
+    }
+
+    let result = ndarray::Zip::from(&*a_data)
+        .and(&*b_data)
+        .map_collect(|&av, &bv| av.hypot(bv));
+    Ok(NDArray::new(rumpy_cpu::CpuArray::from_ndarray(result)))
+}
+
+// ============ Space generation (NumPy parity) ============
+
+/// Generate logarithmically spaced values
+///
+/// Returns num values from base^start to base^stop (inclusive).
+/// Equivalent to numpy.logspace(start, stop, num, base).
+#[wasm_bindgen(js_name = logspaceArr)]
+pub fn logspace_arr(start: f64, stop: f64, num: usize, base: f64) -> NDArray {
+    if num == 0 {
+        return NDArray::new(rumpy_cpu::CpuArray::from_f64_vec(vec![], vec![0]).unwrap());
+    }
+    if num == 1 {
+        return NDArray::new(rumpy_cpu::CpuArray::from_f64_vec(vec![base.powf(start)], vec![1]).unwrap());
+    }
+
+    let step = (stop - start) / (num - 1) as f64;
+    let result: Vec<f64> = (0..num)
+        .map(|i| base.powf(start + step * i as f64))
+        .collect();
+    NDArray::new(rumpy_cpu::CpuArray::from_f64_vec(result, vec![num]).unwrap())
+}
+
+/// Generate geometrically spaced values
+///
+/// Returns num values from start to stop (inclusive) with geometric spacing.
+/// Equivalent to numpy.geomspace(start, stop, num).
+#[wasm_bindgen(js_name = geomspaceArr)]
+pub fn geomspace_arr(start: f64, stop: f64, num: usize) -> Result<NDArray, JsValue> {
+    if start == 0.0 || stop == 0.0 {
+        return Err(JsValue::from_str("geomspace: start and stop must be non-zero"));
+    }
+    if (start < 0.0) != (stop < 0.0) {
+        return Err(JsValue::from_str("geomspace: start and stop must have the same sign"));
+    }
+
+    if num == 0 {
+        return Ok(NDArray::new(rumpy_cpu::CpuArray::from_f64_vec(vec![], vec![0]).unwrap()));
+    }
+    if num == 1 {
+        return Ok(NDArray::new(rumpy_cpu::CpuArray::from_f64_vec(vec![start], vec![1]).unwrap()));
+    }
+
+    let sign = start.signum();
+    let log_start = start.abs().ln();
+    let log_stop = stop.abs().ln();
+    let step = (log_stop - log_start) / (num - 1) as f64;
+
+    let result: Vec<f64> = (0..num)
+        .map(|i| sign * (log_start + step * i as f64).exp())
+        .collect();
+    Ok(NDArray::new(rumpy_cpu::CpuArray::from_f64_vec(result, vec![num]).unwrap()))
+}

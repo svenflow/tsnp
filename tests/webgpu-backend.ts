@@ -7719,13 +7719,20 @@ export class WebGPUBackend implements Backend {
   }
 
   norm(arr: IFaceNDArray, ord: number = 2): number {
+    // GPU implementation using existing ops
     if (ord === Infinity) {
-      return Math.max(...Array.from(arr.data).map(Math.abs));
+      // L-infinity: max of absolute values
+      const absArr = this.abs(arr);
+      return this.max(absArr);
     }
     if (ord === 1) {
-      return Array.from(arr.data).reduce((acc, x) => acc + Math.abs(x), 0);
+      // L1 norm: sum of absolute values
+      const absArr = this.abs(arr);
+      return this.sum(absArr);
     }
-    return Math.sqrt(Array.from(arr.data).reduce((acc, x) => acc + x * x, 0));
+    // L2 (default): sqrt(sum of squares)
+    const squared = this.square(arr);
+    return Math.sqrt(this.sum(squared));
   }
 
   /**
@@ -10168,12 +10175,12 @@ export class WebGPUBackend implements Backend {
   }
 
   logspace(start: number, stop: number, num: number, base: number = 10): IFaceNDArray {
+    // GPU implementation: linspace then exp(x * ln(base))
     const linear = this.linspace(start, stop, num);
-    const result = new Float64Array(num);
-    for (let i = 0; i < num; i++) {
-      result[i] = Math.pow(base, linear.data[i]);
-    }
-    return this.createArray(result, [num]);
+    const lnBase = Math.log(base);
+    // Multiply by ln(base) then apply exp - equivalent to pow(base, x)
+    const scaled = this.mulScalar(linear, lnBase);
+    return this.exp(scaled);
   }
 
   geomspace(start: number, stop: number, num: number): IFaceNDArray {
@@ -10184,17 +10191,17 @@ export class WebGPUBackend implements Backend {
       throw new Error('geomspace: start and stop must have same sign');
     }
 
+    // GPU implementation: linspace in log space then exp
     const logStart = Math.log(Math.abs(start));
     const logStop = Math.log(Math.abs(stop));
     const linear = this.linspace(logStart, logStop, num);
-    const result = new Float64Array(num);
-    const sign = start < 0 ? -1 : 1;
+    const expd = this.exp(linear);
 
-    for (let i = 0; i < num; i++) {
-      result[i] = sign * Math.exp(linear.data[i]);
+    // If negative, negate all values
+    if (start < 0) {
+      return this.mulScalar(expd, -1);
     }
-
-    return this.createArray(result, [num]);
+    return expd;
   }
 
   // ============ Stacking Shortcuts ============
