@@ -119,10 +119,12 @@ describe('rumpy-ts', () => {
       linalgTests(getBackend);
       statsTests(getBackend);
       randomTests(getBackend);
-      // Skip manipulation and phase2 for WebGPU due to vitest/playwright hanging
-      // with large test counts. These are verified via JS/WASM backends.
+      // KNOWN ISSUE: WebGPU + manipulation tests causes vitest/playwright to hang
+      // The hang occurs BEFORE tests run - during test registration when total
+      // registered tests exceeds ~850-900. Not a WebGPU bug, but vitest-browser issue.
+      // Verified: JS/WASM run all 305/306 tests including manipulation.
       // manipulationTests(getBackend);
-      // phase2Tests(getBackend);
+      phase2Tests(getBackend);
     }
   });
 });
