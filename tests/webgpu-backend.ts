@@ -8315,20 +8315,37 @@ export class WebGPUBackend implements Backend {
   }
 
   norm(arr: IFaceNDArray, ord: number = 2): number {
-    // GPU implementation using existing ops
+    // Sync implementation - works directly on data (requires arr to be materialized)
+    // For GPU-optimized async version, use normAsync()
+    const data = arr.data;  // Will throw if GPU data not cached
     if (ord === Infinity) {
       // L-infinity: max of absolute values
-      const absArr = this.abs(arr);
-      return this.max(absArr);
+      let max = Math.abs(data[0]);
+      for (let i = 1; i < data.length; i++) {
+        const abs = Math.abs(data[i]);
+        if (abs > max) max = abs;
+      }
+      return max;
     }
     if (ord === 1) {
       // L1 norm: sum of absolute values
-      const absArr = this.abs(arr);
-      return this.sum(absArr);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += Math.abs(data[i]);
+      return sum;
+    }
+    if (ord === -Infinity) {
+      // -Infinity norm: min of absolute values
+      let min = Math.abs(data[0]);
+      for (let i = 1; i < data.length; i++) {
+        const abs = Math.abs(data[i]);
+        if (abs < min) min = abs;
+      }
+      return min;
     }
     // L2 (default): sqrt(sum of squares)
-    const squared = this.square(arr);
-    return Math.sqrt(this.sum(squared));
+    let sumSq = 0;
+    for (let i = 0; i < data.length; i++) sumSq += data[i] * data[i];
+    return Math.sqrt(sumSq);
   }
 
   /**

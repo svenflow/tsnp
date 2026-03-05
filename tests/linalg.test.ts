@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { Backend, DEFAULT_TOL, RELAXED_TOL, approxEq } from './test-utils';
+import { Backend, DEFAULT_TOL, RELAXED_TOL, SVD_TOL, approxEq } from './test-utils';
 
 // Helper to get data from arrays (handles GPU materialization)
 async function getData(arr: { toArray(): number[] }, B: Backend): Promise<number[]> {
@@ -305,10 +305,10 @@ export function linalgTests(getBackend: () => Backend) {
           }
         }
 
-        // Compare with original
+        // Compare with original (use SVD_TOL because power iteration SVD has limited precision)
         const aData = await getData(a, B);
         for (let i = 0; i < 4; i++) {
-          expect(approxEq(aData[i], reconstructed[i], RELAXED_TOL)).toBe(true);
+          expect(approxEq(aData[i], reconstructed[i], SVD_TOL)).toBe(true);
         }
       });
 

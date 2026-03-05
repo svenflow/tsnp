@@ -33,6 +33,9 @@ export const RELAXED_TOL = 1e-6;
 /** WebGPU tolerance - f32 has ~6-7 decimal digits of precision */
 export const WEBGPU_TOL = 1e-5;
 
+/** SVD tolerance - power iteration SVD has limited precision */
+export const SVD_TOL = 1e-4;
+
 /** Get tolerance appropriate for backend precision */
 export function getTol(backend: Backend, relaxed: boolean = false): number {
   if (backend.name === 'webgpu') {
