@@ -7309,7 +7309,7 @@ export class WebGPUBackend implements Backend {
 
     const numRowWorkgroups = Math.ceil(m / 256);
 
-    // Reusable buffers
+    // Reusable buffers (created once, reused across iterations)
     const dimsBuffer = this.device.createBuffer({
       size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -7323,183 +7323,207 @@ export class WebGPUBackend implements Backend {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
 
-    // Process each column
-    for (let col = 0; col < n; col++) {
-      // Step 1: GPU reduction for column norm
-      this.device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([m, n, col, 0]));
+    // Pooled staging buffer for norm partials (reused across iterations)
+    const normStagingBuffer = this.bufferManager.acquireStaging(numRowWorkgroups * 4);
 
-      let commandEncoder = this.device.createCommandEncoder();
-      let pass = commandEncoder.beginComputePass();
-      pass.setPipeline(normPipeline);
-      pass.setBindGroup(0, this.device.createBindGroup({
-        layout: normPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: qBuffer } },
-          { binding: 1, resource: { buffer: normPartials } },
-          { binding: 2, resource: { buffer: dimsBuffer } },
-        ],
-      }));
-      pass.dispatchWorkgroups(Math.max(numRowWorkgroups, 1));
-      pass.end();
+    // Track staging buffers acquired during iteration for cleanup
+    const acquiredStagingBuffers: GPUBuffer[] = [normStagingBuffer];
 
-      // Read partial sums and complete reduction
-      const normStagingBuffer = this.device.createBuffer({
-        size: numRowWorkgroups * 4,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-      });
-      commandEncoder.copyBufferToBuffer(normPartials, 0, normStagingBuffer, 0, numRowWorkgroups * 4);
-      this.device.queue.submit([commandEncoder.finish()]);
+    try {
+      // Process each column
+      for (let col = 0; col < n; col++) {
+        // Step 1: GPU reduction for column norm
+        this.device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([m, n, col, 0]));
 
-      await normStagingBuffer.mapAsync(GPUMapMode.READ);
-      const partials = new Float32Array(normStagingBuffer.getMappedRange().slice(0));
-      normStagingBuffer.unmap();
-      normStagingBuffer.destroy();
-
-      let normSquared = 0;
-      for (let i = 0; i < numRowWorkgroups; i++) normSquared += partials[i];
-      const colNorm = Math.sqrt(normSquared);
-
-      // Step 2: GPU normalize column
-      this.device.queue.writeBuffer(normBuffer, 0, new Float32Array([colNorm]));
-
-      commandEncoder = this.device.createCommandEncoder();
-      pass = commandEncoder.beginComputePass();
-      pass.setPipeline(normalizePipeline);
-      pass.setBindGroup(0, this.device.createBindGroup({
-        layout: normalizePipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: qBuffer } },
-          { binding: 1, resource: { buffer: rBuffer } },
-          { binding: 2, resource: { buffer: dimsBuffer } },
-          { binding: 3, resource: { buffer: normBuffer } },
-        ],
-      }));
-      pass.dispatchWorkgroups(Math.ceil(m / 256));
-      pass.end();
-      this.device.queue.submit([commandEncoder.finish()]);
-
-      // Step 3: Orthogonalize remaining columns using GPU
-      const numCols = n - col - 1;
-      if (numCols > 0) {
-        const numRowWorkgroups = Math.ceil(m / 256);
-
-        // GPU: Compute dot products using QR_DOT_COLUMNS_SHADER
-        // Output is partial sums: [numCols * numRowWorkgroups]
-        const dotPartialsBuffer = this.device.createBuffer({
-          size: numCols * numRowWorkgroups * 4,
-          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-        });
-        this.device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([m, n, col, numCols]));
-
-        const dotPipeline = this.getOrCreatePipeline('qr_dot_columns', QR_DOT_COLUMNS_SHADER);
-        commandEncoder = this.device.createCommandEncoder();
-        pass = commandEncoder.beginComputePass();
-        pass.setPipeline(dotPipeline);
+        let commandEncoder = this.device.createCommandEncoder();
+        let pass = commandEncoder.beginComputePass();
+        pass.setPipeline(normPipeline);
         pass.setBindGroup(0, this.device.createBindGroup({
-          layout: dotPipeline.getBindGroupLayout(0),
+          layout: normPipeline.getBindGroupLayout(0),
           entries: [
             { binding: 0, resource: { buffer: qBuffer } },
-            { binding: 1, resource: { buffer: dotPartialsBuffer } },
+            { binding: 1, resource: { buffer: normPartials } },
             { binding: 2, resource: { buffer: dimsBuffer } },
           ],
         }));
-        pass.dispatchWorkgroups(numRowWorkgroups, numCols);
+        pass.dispatchWorkgroups(Math.max(numRowWorkgroups, 1));
         pass.end();
 
-        // Read back partial sums for final reduction (small amount of data)
-        const dotPartialsStagingBuffer = this.device.createBuffer({
-          size: numCols * numRowWorkgroups * 4,
-          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-        });
-        commandEncoder.copyBufferToBuffer(dotPartialsBuffer, 0, dotPartialsStagingBuffer, 0, numCols * numRowWorkgroups * 4);
+        // Copy to pooled staging buffer (reused)
+        commandEncoder.copyBufferToBuffer(normPartials, 0, normStagingBuffer, 0, numRowWorkgroups * 4);
         this.device.queue.submit([commandEncoder.finish()]);
 
-        await dotPartialsStagingBuffer.mapAsync(GPUMapMode.READ);
-        const partials = new Float32Array(dotPartialsStagingBuffer.getMappedRange().slice(0));
-        dotPartialsStagingBuffer.unmap();
-        dotPartialsStagingBuffer.destroy();
-        dotPartialsBuffer.destroy();
+        await normStagingBuffer.mapAsync(GPUMapMode.READ);
+        const partials = new Float32Array(normStagingBuffer.getMappedRange().slice(0));
+        normStagingBuffer.unmap();
 
-        // Final reduction of partial sums (small: numRowWorkgroups values per column)
-        const dots = new Float32Array(numCols);
-        for (let kOffset = 0; kOffset < numCols; kOffset++) {
-          let sum = 0;
-          for (let wg = 0; wg < numRowWorkgroups; wg++) {
-            sum += partials[kOffset * numRowWorkgroups + wg];
+        let normSquared = 0;
+        for (let i = 0; i < numRowWorkgroups; i++) normSquared += partials[i];
+        const colNorm = Math.sqrt(normSquared);
+
+        // Step 2: GPU normalize column
+        this.device.queue.writeBuffer(normBuffer, 0, new Float32Array([colNorm]));
+
+        // Step 3: Orthogonalize remaining columns using GPU
+        const numCols = n - col - 1;
+
+        if (numCols > 0) {
+          // BATCHED: Combine normalize + dot products + orthogonalize into fewer submissions
+          // We need to read dot products mid-way, so we batch: [normalize] then [dot+copy] then [orthogonalize]
+
+          // Pass 1: Normalize column (no readback needed)
+          commandEncoder = this.device.createCommandEncoder();
+          pass = commandEncoder.beginComputePass();
+          pass.setPipeline(normalizePipeline);
+          pass.setBindGroup(0, this.device.createBindGroup({
+            layout: normalizePipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: qBuffer } },
+              { binding: 1, resource: { buffer: rBuffer } },
+              { binding: 2, resource: { buffer: dimsBuffer } },
+              { binding: 3, resource: { buffer: normBuffer } },
+            ],
+          }));
+          pass.dispatchWorkgroups(Math.ceil(m / 256));
+          pass.end();
+
+          // GPU: Compute dot products using QR_DOT_COLUMNS_SHADER
+          // Output is partial sums: [numCols * numRowWorkgroups]
+          const dotPartialsBuffer = this.device.createBuffer({
+            size: numCols * numRowWorkgroups * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+          });
+          this.device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([m, n, col, numCols]));
+
+          const dotPipeline = this.getOrCreatePipeline('qr_dot_columns', QR_DOT_COLUMNS_SHADER);
+          pass = commandEncoder.beginComputePass();
+          pass.setPipeline(dotPipeline);
+          pass.setBindGroup(0, this.device.createBindGroup({
+            layout: dotPipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: qBuffer } },
+              { binding: 1, resource: { buffer: dotPartialsBuffer } },
+              { binding: 2, resource: { buffer: dimsBuffer } },
+            ],
+          }));
+          pass.dispatchWorkgroups(numRowWorkgroups, numCols);
+          pass.end();
+
+          // Pooled staging for dot partials
+          const dotPartialsStagingBuffer = this.bufferManager.acquireStaging(numCols * numRowWorkgroups * 4);
+          acquiredStagingBuffers.push(dotPartialsStagingBuffer);
+
+          commandEncoder.copyBufferToBuffer(dotPartialsBuffer, 0, dotPartialsStagingBuffer, 0, numCols * numRowWorkgroups * 4);
+
+          // Submit batched work: normalize + dot products
+          this.device.queue.submit([commandEncoder.finish()]);
+
+          await dotPartialsStagingBuffer.mapAsync(GPUMapMode.READ);
+          const dotPartials = new Float32Array(dotPartialsStagingBuffer.getMappedRange().slice(0));
+          dotPartialsStagingBuffer.unmap();
+
+          // Release staging buffer back to pool for reuse
+          this.bufferManager.releaseStaging(dotPartialsStagingBuffer);
+          acquiredStagingBuffers.pop();
+
+          dotPartialsBuffer.destroy();
+
+          // Final reduction of partial sums (small: numRowWorkgroups values per column)
+          const dots = new Float32Array(numCols);
+          for (let kOffset = 0; kOffset < numCols; kOffset++) {
+            let sum = 0;
+            for (let wg = 0; wg < numRowWorkgroups; wg++) {
+              sum += dotPartials[kOffset * numRowWorkgroups + wg];
+            }
+            dots[kOffset] = sum;
           }
-          dots[kOffset] = sum;
+
+          // GPU orthogonalize
+          const dotsBuffer = this.device.createBuffer({
+            size: numCols * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          });
+          this.device.queue.writeBuffer(dotsBuffer, 0, dots);
+          this.device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([m, n, col, numCols]));
+
+          commandEncoder = this.device.createCommandEncoder();
+          pass = commandEncoder.beginComputePass();
+          pass.setPipeline(orthogPipeline);
+          pass.setBindGroup(0, this.device.createBindGroup({
+            layout: orthogPipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: qBuffer } },
+              { binding: 1, resource: { buffer: rBuffer } },
+              { binding: 2, resource: { buffer: dotsBuffer } },
+              { binding: 3, resource: { buffer: dimsBuffer } },
+            ],
+          }));
+          pass.dispatchWorkgroups(Math.ceil(m / 16), Math.ceil(numCols / 16));
+          pass.end();
+          this.device.queue.submit([commandEncoder.finish()]);
+
+          dotsBuffer.destroy();
+        } else {
+          // Last column: just normalize, no orthogonalization needed
+          commandEncoder = this.device.createCommandEncoder();
+          pass = commandEncoder.beginComputePass();
+          pass.setPipeline(normalizePipeline);
+          pass.setBindGroup(0, this.device.createBindGroup({
+            layout: normalizePipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: qBuffer } },
+              { binding: 1, resource: { buffer: rBuffer } },
+              { binding: 2, resource: { buffer: dimsBuffer } },
+              { binding: 3, resource: { buffer: normBuffer } },
+            ],
+          }));
+          pass.dispatchWorkgroups(Math.ceil(m / 256));
+          pass.end();
+          this.device.queue.submit([commandEncoder.finish()]);
         }
-
-        // GPU orthogonalize
-        const dotsBuffer = this.device.createBuffer({
-          size: numCols * 4,
-          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        });
-        this.device.queue.writeBuffer(dotsBuffer, 0, dots);
-        this.device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([m, n, col, numCols]));
-
-        commandEncoder = this.device.createCommandEncoder();
-        pass = commandEncoder.beginComputePass();
-        pass.setPipeline(orthogPipeline);
-        pass.setBindGroup(0, this.device.createBindGroup({
-          layout: orthogPipeline.getBindGroupLayout(0),
-          entries: [
-            { binding: 0, resource: { buffer: qBuffer } },
-            { binding: 1, resource: { buffer: rBuffer } },
-            { binding: 2, resource: { buffer: dotsBuffer } },
-            { binding: 3, resource: { buffer: dimsBuffer } },
-          ],
-        }));
-        pass.dispatchWorkgroups(Math.ceil(m / 16), Math.ceil(numCols / 16));
-        pass.end();
-        this.device.queue.submit([commandEncoder.finish()]);
-
-        dotsBuffer.destroy();
       }
+
+      // Read final results using pooled staging buffers
+      const qFinalStaging = this.bufferManager.acquireStaging(m * n * 4);
+      const rFinalStaging = this.bufferManager.acquireStaging(n * n * 4);
+      acquiredStagingBuffers.push(qFinalStaging, rFinalStaging);
+
+      const commandEncoder = this.device.createCommandEncoder();
+      commandEncoder.copyBufferToBuffer(qBuffer, 0, qFinalStaging, 0, m * n * 4);
+      commandEncoder.copyBufferToBuffer(rBuffer, 0, rFinalStaging, 0, n * n * 4);
+      this.device.queue.submit([commandEncoder.finish()]);
+
+      await qFinalStaging.mapAsync(GPUMapMode.READ);
+      const qFinal = new Float32Array(qFinalStaging.getMappedRange().slice(0));
+      qFinalStaging.unmap();
+
+      await rFinalStaging.mapAsync(GPUMapMode.READ);
+      const rFinal = new Float32Array(rFinalStaging.getMappedRange().slice(0));
+      rFinalStaging.unmap();
+
+      // Convert to f64
+      const qResult = new Float64Array(m * n);
+      const rResult = new Float64Array(n * n);
+      for (let i = 0; i < m * n; i++) qResult[i] = qFinal[i];
+      for (let i = 0; i < n * n; i++) rResult[i] = rFinal[i];
+
+      return {
+        q: this.createArray(qResult, [m, n]),
+        r: this.createArray(rResult, [n, n]),
+      };
+    } finally {
+      // Cleanup: release all pooled staging buffers
+      for (const buf of acquiredStagingBuffers) {
+        this.bufferManager.releaseStaging(buf);
+      }
+
+      // Destroy non-pooled GPU buffers
+      dimsBuffer.destroy();
+      normBuffer.destroy();
+      normPartials.destroy();
+      qBuffer.destroy();
+      rBuffer.destroy();
     }
-
-    // Read final results
-    const qFinalStaging = this.device.createBuffer({
-      size: m * n * 4,
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-    const rFinalStaging = this.device.createBuffer({
-      size: n * n * 4,
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-
-    const commandEncoder = this.device.createCommandEncoder();
-    commandEncoder.copyBufferToBuffer(qBuffer, 0, qFinalStaging, 0, m * n * 4);
-    commandEncoder.copyBufferToBuffer(rBuffer, 0, rFinalStaging, 0, n * n * 4);
-    this.device.queue.submit([commandEncoder.finish()]);
-
-    await qFinalStaging.mapAsync(GPUMapMode.READ);
-    const qFinal = new Float32Array(qFinalStaging.getMappedRange().slice(0));
-    qFinalStaging.unmap();
-    qFinalStaging.destroy();
-
-    await rFinalStaging.mapAsync(GPUMapMode.READ);
-    const rFinal = new Float32Array(rFinalStaging.getMappedRange().slice(0));
-    rFinalStaging.unmap();
-    rFinalStaging.destroy();
-
-    // Cleanup
-    dimsBuffer.destroy();
-    normBuffer.destroy();
-    normPartials.destroy();
-    qBuffer.destroy();
-    rBuffer.destroy();
-
-    // Convert to f64
-    const qResult = new Float64Array(m * n);
-    const rResult = new Float64Array(n * n);
-    for (let i = 0; i < m * n; i++) qResult[i] = qFinal[i];
-    for (let i = 0; i < n * n; i++) rResult[i] = rFinal[i];
-
-    return {
-      q: this.createArray(qResult, [m, n]),
-      r: this.createArray(rResult, [n, n]),
-    };
   }
 
   /**
