@@ -1,0 +1,20 @@
+{
+  "name": "pydatajs",
+  "version": "0.0.1",
+  "private": true,
+  "description": "PyData ecosystem for JavaScript - NumPy, SciPy, scikit-learn, and more",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/svenflow/pydatajs.git"
+  },
+  "keywords": ["numpy", "scipy", "scikit-learn", "machine-learning", "scientific-computing"],
+  "author": "pydatajs",
+  "license": "MIT"
+}

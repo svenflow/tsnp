@@ -1,0 +1,17 @@
+{
+  "name": "scikitlearnjs",
+  "version": "0.0.1",
+  "description": "scikit-learn for JavaScript - Machine learning library",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest"
+  },
+  "keywords": ["machine-learning", "ml", "sklearn", "scikit-learn", "javascript"],
+  "author": "pydatajs",
+  "license": "MIT",
+  "dependencies": {
+    "numpyjs": "workspace:*"
+  }
+}
