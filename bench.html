@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>numpyjs WebGPU Matmul Benchmark</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', sans-serif;
+      background: #111; color: #e0e0e0;
+      padding: 16px; max-width: 600px; margin: 0 auto;
+    }
+    h1 { font-size: 22px; color: #fff; margin-bottom: 8px; }
+    .subtitle { font-size: 13px; color: #888; margin-bottom: 16px; }
+    .card {
+      background: #1e1e1e; border-radius: 12px; padding: 16px;
+      margin-bottom: 12px; border: 1px solid #333;
+    }
+    .card h2 { font-size: 16px; color: #fff; margin-bottom: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; padding: 6px 8px; color: #888; border-bottom: 1px solid #333; }
+    td { padding: 6px 8px; border-bottom: 1px solid #222; }
+    .gflops { font-weight: bold; font-size: 15px; }
+    .winner { color: #4ade80; }
+    .loser { color: #888; }
+    .running { color: #fbbf24; }
+    .btn {
+      display: block; width: 100%; padding: 14px;
+      background: #2563eb; color: white; border: none;
+      border-radius: 10px; font-size: 16px; font-weight: 600;
+      cursor: pointer; margin-bottom: 12px;
+    }
+    .btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+    .btn:active:not(:disabled) { background: #1d4ed8; }
+    #status { font-size: 13px; color: #888; margin-bottom: 8px; min-height: 20px; }
+    pre {
+      background: #1a1a1a; padding: 10px; border-radius: 8px;
+      font-size: 11px; overflow-x: auto; max-height: 200px;
+      overflow-y: auto; color: #aaa; white-space: pre-wrap;
+    }
+    .device-info { font-size: 12px; color: #666; margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+  <h1>⚡ numpyjs Matmul Benchmark</h1>
+  <div class="subtitle">WebGPU matrix multiplication • GPU-resident f32</div>
+  <div id="device-info" class="device-info"></div>
+
+  <button class="btn" id="runBtn" onclick="runBenchmark()">Run Benchmark</button>
+  <div id="status"></div>
+
+  <div class="card" id="results-card" style="display:none">
+    <h2>Results</h2>
+    <table>
+      <thead>
+        <tr><th>Size</th><th>Time</th><th>GFLOPS</th><th>vs tfjs-BCACHE</th></tr>
+      </thead>
+      <tbody id="results"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Log</h2>
+    <pre id="log">Waiting to start...</pre>
+  </div>
+
+<script>
+// ============ TFJS-BCACHE WGSL Shader (our fastest kernel) ============
+const MATMUL_SHADER = `
+  struct Uniforms { M: u32, K: u32, N: u32, _pad: u32, }
+  @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+  @group(0) @binding(1) var<storage, read> A: array<vec4<f32>>;
+  @group(0) @binding(2) var<storage, read> B: array<vec4<f32>>;
+  @group(0) @binding(3) var<storage, read_write> C: array<vec4<f32>>;
+  var<workgroup> mm_Asub: array<array<vec4<f32>, 8>, 32>;
+  var<workgroup> mm_Bsub: array<array<vec4<f32>, 8>, 32>;
+
+  @compute @workgroup_size(8, 8, 1)
+  fn main(@builtin(local_invocation_id) localId: vec3<u32>, @builtin(global_invocation_id) globalId: vec3<u32>) {
+    let M = i32(uniforms.M);
+    let K = i32(uniforms.K);
+    let N = i32(uniforms.N);
+    let KVec4 = K / 4;
+    let NVec4 = N / 4;
+
+    let localRow = i32(localId.y);
+    let tileRow = localRow * 4;
+    let tileCol = i32(localId.x);
+    let globalRow = i32(globalId.y) * 4;
+    let globalCol = i32(globalId.x) * 4;
+
+    var acc: array<vec4<f32>, 4>;
+    acc[0] = vec4<f32>(0.0); acc[1] = vec4<f32>(0.0);
+    acc[2] = vec4<f32>(0.0); acc[3] = vec4<f32>(0.0);
+
+    let numTiles = (K + 31) / 32;
+    var kStart = 0;
+    let tileRowB = localRow * 4;
+
+    for (var t = 0; t < numTiles; t++) {
+      for (var innerRow = 0; innerRow < 4; innerRow++) {
+        let inputRow = tileRow + innerRow;
+        let aRow = globalRow + innerRow;
+        let aColVec4 = (kStart + tileCol * 4) / 4;
+        if (aRow < M && aColVec4 < KVec4) {
+          mm_Asub[inputRow][tileCol] = A[aRow * KVec4 + aColVec4];
+        } else {
+          mm_Asub[inputRow][tileCol] = vec4<f32>(0.0);
+        }
+      }
+
+      for (var innerRow = 0; innerRow < 4; innerRow++) {
+        let inputRow = tileRowB + innerRow;
+        let bRow = kStart + inputRow;
+        let bColVec4 = globalCol / 4;
+        if (bRow < K && bColVec4 < NVec4) {
+          mm_Bsub[inputRow][tileCol] = B[bRow * NVec4 + bColVec4];
+        } else {
+          mm_Bsub[inputRow][tileCol] = vec4<f32>(0.0);
+        }
+      }
+
+      kStart = kStart + 32;
+      workgroupBarrier();
+
+      for (var k = 0; k < 8; k++) {
+        let BCached0 = mm_Bsub[k * 4 + 0][tileCol];
+        let BCached1 = mm_Bsub[k * 4 + 1][tileCol];
+        let BCached2 = mm_Bsub[k * 4 + 2][tileCol];
+        let BCached3 = mm_Bsub[k * 4 + 3][tileCol];
+
+        for (var i = 0; i < 4; i++) {
+          let ACached = mm_Asub[tileRow + i][k];
+          acc[i] = fma(BCached0, vec4<f32>(ACached[0]), acc[i]);
+          acc[i] = fma(BCached1, vec4<f32>(ACached[1]), acc[i]);
+          acc[i] = fma(BCached2, vec4<f32>(ACached[2]), acc[i]);
+          acc[i] = fma(BCached3, vec4<f32>(ACached[3]), acc[i]);
+        }
+      }
+      workgroupBarrier();
+    }
+
+    for (var innerRow = 0; innerRow < 4; innerRow++) {
+      let outRow = globalRow + innerRow;
+      let outColVec4 = globalCol / 4;
+      if (outRow < M && outColVec4 < NVec4) {
+        C[outRow * NVec4 + outColVec4] = acc[innerRow];
+      }
+    }
+  }
+`;
+
+let device = null;
+let pipeline = null;
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+const resultsCard = document.getElementById('results-card');
+const runBtn = document.getElementById('runBtn');
+const deviceInfoEl = document.getElementById('device-info');
+
+function log(msg) {
+  logEl.textContent += '\n' + msg;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+async function initWebGPU() {
+  if (!navigator.gpu) throw new Error('WebGPU not supported');
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) throw new Error('No GPU adapter found');
+
+  const info = adapter.info || {};
+  const desc = info.description || info.device || 'Unknown GPU';
+  const vendor = info.vendor || '';
+  const arch = info.architecture || '';
+  deviceInfoEl.textContent = `GPU: ${desc} ${vendor} ${arch}`.trim();
+
+  device = await adapter.requestDevice({
+    requiredLimits: {
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      maxBufferSize: adapter.limits.maxBufferSize,
+      maxComputeWorkgroupsPerDimension: adapter.limits.maxComputeWorkgroupsPerDimension,
+    },
+  });
+
+  const module = device.createShaderModule({ code: MATMUL_SHADER });
+  pipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: { module, entryPoint: 'main' },
+  });
+
+  log('WebGPU initialized: ' + desc);
+}
+
+function createBuffer(data, usage) {
+  const buf = device.createBuffer({
+    size: data.byteLength,
+    usage: usage | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(buf, 0, data);
+  return buf;
+}
+
+async function benchmarkMatmul(size, warmup = 5, runs = 10) {
+  const n = size;
+  const nPad = Math.ceil(n / 4) * 4; // vec4 align
+
+  // Create random f32 matrices with vec4 padding
+  const aData = new Float32Array(n * nPad);
+  const bData = new Float32Array(n * nPad);
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      aData[r * nPad + c] = Math.random();
+      bData[r * nPad + c] = Math.random();
+    }
+  }
+
+  const aBuf = createBuffer(aData, GPUBufferUsage.STORAGE);
+  const bBuf = createBuffer(bData, GPUBufferUsage.STORAGE);
+  const cBuf = device.createBuffer({
+    size: n * nPad * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+  });
+  const uniformData = new Uint32Array([n, n, n, 0]);
+  const uniformBuf = createBuffer(uniformData, GPUBufferUsage.UNIFORM);
+
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuf } },
+      { binding: 1, resource: { buffer: aBuf } },
+      { binding: 2, resource: { buffer: bBuf } },
+      { binding: 3, resource: { buffer: cBuf } },
+    ],
+  });
+
+  const wgX = Math.ceil(n / 32);
+  const wgY = Math.ceil(n / 32);
+
+  // Warmup
+  for (let i = 0; i < warmup; i++) {
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(wgX, wgY);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+  await device.queue.onSubmittedWorkDone();
+
+  // Benchmark
+  const times = [];
+  for (let i = 0; i < runs; i++) {
+    const start = performance.now();
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(wgX, wgY);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    times.push(performance.now() - start);
+  }
+
+  aBuf.destroy();
+  bBuf.destroy();
+  cBuf.destroy();
+  uniformBuf.destroy();
+
+  const avg = times.reduce((a, b) => a + b) / times.length;
+  const min = Math.min(...times);
+  const flops = 2 * n * n * n;
+  const gflops = flops / (avg / 1000) / 1e9;
+
+  return { size, avgMs: avg, minMs: min, gflops };
+}
+
+// Auto-detect sizes based on device capability
+function getSizes() {
+  const params = new URLSearchParams(location.search);
+  if (params.has('sizes')) {
+    return params.get('sizes').split(',').map(Number);
+  }
+  // Default: test common sizes. Skip 4096 on mobile (too slow / OOM)
+  const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
+  return isMobile ? [256, 512, 1024, 2048] : [256, 512, 1024, 2048, 4096];
+}
+
+window.runBenchmark = async function() {
+  runBtn.disabled = true;
+  logEl.textContent = '';
+  resultsEl.innerHTML = '';
+  resultsCard.style.display = 'block';
+
+  try {
+    setStatus('Initializing WebGPU...');
+    if (!device) await initWebGPU();
+
+    const sizes = getSizes();
+    const allResults = [];
+
+    for (const size of sizes) {
+      setStatus(`Benchmarking ${size}×${size}...`);
+      log(`\n--- ${size}×${size} ---`);
+
+      const result = await benchmarkMatmul(size);
+      allResults.push(result);
+
+      log(`  ${result.avgMs.toFixed(2)}ms avg (${result.minMs.toFixed(2)}ms min) = ${result.gflops.toFixed(0)} GFLOPS`);
+
+      // Update table
+      const tr = document.createElement('tr');
+      const gflopsClass = result.gflops > 1000 ? 'winner' : '';
+      tr.innerHTML = `
+        <td>${size}</td>
+        <td>${result.avgMs.toFixed(2)}ms</td>
+        <td class="gflops ${gflopsClass}">${result.gflops.toFixed(0)}</td>
+        <td>—</td>
+      `;
+      resultsEl.appendChild(tr);
+    }
+
+    // Summary
+    log('\n=== SUMMARY ===');
+    for (const r of allResults) {
+      log(`${r.size}×${r.size}: ${r.gflops.toFixed(0)} GFLOPS (${r.avgMs.toFixed(2)}ms)`);
+    }
+
+    const peak = allResults.reduce((a, b) => a.gflops > b.gflops ? a : b);
+    log(`\nPeak: ${peak.gflops.toFixed(0)} GFLOPS at ${peak.size}×${peak.size}`);
+    if (peak.gflops > 1000) log(`🔥 ${(peak.gflops / 1000).toFixed(1)} TFLOPS!`);
+
+    setStatus(`Done! Peak: ${peak.gflops.toFixed(0)} GFLOPS`);
+
+    // Store for programmatic access
+    window.benchmarkResults = allResults;
+
+  } catch (e) {
+    log('ERROR: ' + e.message);
+    setStatus('Error: ' + e.message);
+    console.error(e);
+  }
+
+  runBtn.disabled = false;
+};
+
+// Auto-start if URL param is set
+if (new URLSearchParams(location.search).has('autostart')) {
+  window.runBenchmark();
+}
+</script>
+</body>
+</html>

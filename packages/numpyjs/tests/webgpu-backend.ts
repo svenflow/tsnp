@@ -3597,6 +3597,88 @@ const MATMUL_TFJS_BCACHE_SHADER = `
   }
 `;
 
+// ============ BCACHE-FIT KERNEL (No bounds checking, 4×4 output per thread) ============
+// Used when M%32==0 && N%32==0 && K%32==0
+// Lower register pressure than 8X8-MEGA: only 4 vec4 accumulators (vs 16)
+// Better occupancy on Apple GPUs at medium sizes (1024)
+// 32×32 tile, [8,8] workgroup, 4 rows × 1 vec4 col per thread
+const MATMUL_BCACHE_FIT_SHADER = `
+  struct Uniforms { M: u32, K: u32, N: u32, _pad: u32, }
+  @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+  @group(0) @binding(1) var<storage, read> A: array<vec4<f32>>;
+  @group(0) @binding(2) var<storage, read> B: array<vec4<f32>>;
+  @group(0) @binding(3) var<storage, read_write> C: array<vec4<f32>>;
+  var<workgroup> mm_Asub: array<array<vec4<f32>, 8>, 32>;  // [32 rows][8 vec4s] = 32x32 tile
+  var<workgroup> mm_Bsub: array<array<vec4<f32>, 8>, 32>;  // [32 K rows][8 vec4s] = 32x32 tile
+
+  @compute @workgroup_size(8, 8, 1)
+  fn main(@builtin(local_invocation_id) localId: vec3<u32>, @builtin(global_invocation_id) globalId: vec3<u32>) {
+    let K = i32(uniforms.K);
+    let N = i32(uniforms.N);
+    let KVec4 = K / 4;
+    let NVec4 = N / 4;
+
+    let localRow = i32(localId.y);
+    let tileRow = localRow * 4;
+    let tileCol = i32(localId.x);
+    let globalRow = i32(globalId.y) * 4;
+    let globalCol = i32(globalId.x) * 4;
+
+    var acc: array<vec4<f32>, 4>;
+    acc[0] = vec4<f32>(0.0); acc[1] = vec4<f32>(0.0);
+    acc[2] = vec4<f32>(0.0); acc[3] = vec4<f32>(0.0);
+
+    let numTiles = K / 32;
+    var kStart = 0;
+    let tileRowB = localRow * 4;
+
+    for (var t = 0; t < numTiles; t++) {
+      // LOAD A TILE: no bounds checking
+      for (var innerRow = 0; innerRow < 4; innerRow++) {
+        let inputRow = tileRow + innerRow;
+        let aRow = globalRow + innerRow;
+        let aColVec4 = (kStart + tileCol * 4) / 4;
+        mm_Asub[inputRow][tileCol] = A[aRow * KVec4 + aColVec4];
+      }
+
+      // LOAD B TILE: no bounds checking
+      for (var innerRow = 0; innerRow < 4; innerRow++) {
+        let inputRow = tileRowB + innerRow;
+        let bRow = kStart + inputRow;
+        let bColVec4 = globalCol / 4;
+        mm_Bsub[inputRow][tileCol] = B[bRow * NVec4 + bColVec4];
+      }
+
+      kStart = kStart + 32;
+      workgroupBarrier();
+
+      // COMPUTE: B-caching, fully unrolled
+      for (var k = 0; k < 8; k++) {
+        let BCached0 = mm_Bsub[k * 4 + 0][tileCol];
+        let BCached1 = mm_Bsub[k * 4 + 1][tileCol];
+        let BCached2 = mm_Bsub[k * 4 + 2][tileCol];
+        let BCached3 = mm_Bsub[k * 4 + 3][tileCol];
+
+        for (var i = 0; i < 4; i++) {
+          let ACached = mm_Asub[tileRow + i][k];
+          acc[i] = fma(BCached0, vec4<f32>(ACached[0]), acc[i]);
+          acc[i] = fma(BCached1, vec4<f32>(ACached[1]), acc[i]);
+          acc[i] = fma(BCached2, vec4<f32>(ACached[2]), acc[i]);
+          acc[i] = fma(BCached3, vec4<f32>(ACached[3]), acc[i]);
+        }
+      }
+      workgroupBarrier();
+    }
+
+    // WRITE OUTPUT: no bounds checking
+    for (var innerRow = 0; innerRow < 4; innerRow++) {
+      let outRow = globalRow + innerRow;
+      let outColVec4 = globalCol / 4;
+      C[outRow * NVec4 + outColVec4] = acc[innerRow];
+    }
+  }
+`;
+
 // ============ 8x8 MEGA KERNEL (Nussbaum-style, target: 1+ TFLOP) ============
 //
 // Each thread computes 8×8 = 64 output elements. With an [8,8] workgroup that's
@@ -5077,6 +5159,20 @@ const SHADER_CONFIGS: ShaderConfig[] = [
     maxSize: -1,
   },
   {
+    name: 'BCACHE-FIT',
+    shader: MATMUL_BCACHE_FIT_SHADER,
+    tileM: 32,
+    tileN: 32,
+    tileK: 32,
+    workgroupSize: [8, 8],
+    requiresFit: true, // No bounds checking - requires exact fit
+    usesVec4B: true,
+    usesVec4C: true,
+    usesVec4A: true,
+    minSize: 64,
+    maxSize: -1,
+  },
+  {
     name: 'TFJS-BCACHE',
     shader: MATMUL_TFJS_BCACHE_SHADER,
     tileM: 32,
@@ -5151,13 +5247,18 @@ const autotuneCache = new Map<string, string>();
 // 8X8-MEGA-FIT is fastest for large aligned matrices (8×8 output per thread)
 // 8X8-MEGA for large non-aligned matrices (with bounds checking)
 // REGISTER-BLOCKED for small matrices (lower launch overhead)
+// Autotuned presets (tested on M4 Mac mini):
+// TFJS-BCACHE wins at ALL sizes due to lower register pressure on Apple GPUs.
+// 4×4 output/thread = 4 vec4 accumulators vs 8×8's 16 vec4 accumulators.
+// The 8×8 kernel's extra register pressure causes spills that negate its
+// higher compute-per-thread advantage.
 const PRESET_CONFIGS: Record<string, string> = {
-  '4096x4096x4096': '8X8-MEGA-FIT',
-  '2048x2048x2048': '8X8-MEGA-FIT',
-  '1024x1024x1024': '8X8-MEGA-FIT',
-  '512x512x512': '8X8-MEGA-FIT',
-  '256x256x256': '8X8-MEGA-FIT',
-  '128x128x128': '8X8-MEGA-FIT',
+  '4096x4096x4096': 'TFJS-BCACHE',
+  '2048x2048x2048': 'TFJS-BCACHE',
+  '1024x1024x1024': 'TFJS-BCACHE',
+  '512x512x512': 'TFJS-BCACHE',
+  '256x256x256': 'TFJS-BCACHE',
+  '128x128x128': 'TFJS-BCACHE',
   // Small matrices: simpler shader with lower overhead
   '64x64x64': 'REGISTER-BLOCKED',
 };
@@ -5201,24 +5302,18 @@ function getBestConfig(m: number, k: number, n: number): ShaderConfig | null {
     return SHADER_CONFIGS.find(c => c.name === 'TFJS-VEC4-INNER') || null;
   }
 
-  // Prefer 8x8 FIT when dimensions align (fastest kernel)
-  const megaFit = validConfigs.find(c => c.name === '8X8-MEGA-FIT');
-  if (megaFit) return megaFit;
+  // Prefer TFJS-BCACHE: lower register pressure, best on Apple GPUs at all sizes
+  // 4×4 output/thread with B-caching pattern wins over 8×8 due to register spills
+  const bcache = validConfigs.find(c => c.name === 'TFJS-BCACHE');
+  if (bcache && minDim >= 64) return bcache;
 
-  // Otherwise prefer 8x8 MEGA (with bounds checking)
-  const mega = validConfigs.find(c => c.name === '8X8-MEGA');
-  if (mega && maxDim >= 128) return mega;
-
-  // Fallback: FIT shaders for aligned dims
-  const fitConfig = validConfigs.find(c => c.requiresFit);
-  if (fitConfig) return fitConfig;
-
-  // Size-based fallback
-  if (maxDim >= 512) {
-    return validConfigs.find(c => c.name === 'TFJS-BCACHE') || validConfigs[0];
-  } else {
+  // Fallback for small matrices
+  if (maxDim <= 256) {
     return validConfigs.find(c => c.name === 'REGISTER-BLOCKED') || validConfigs[0];
   }
+
+  // Generic fallback
+  return validConfigs[0];
 }
 
 // Get config by name

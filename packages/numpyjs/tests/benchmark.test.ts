@@ -3,6 +3,7 @@
  *
  * Fair comparison using f32:
  * - WebGPU vs WebGPU: numpyjs-webgpu vs tfjs-webgpu
+ * - Tests multiple kernel variants to find optimal per size
  *
  * Runs in Playwright browser environment for accurate GPU timings.
  */
@@ -37,6 +38,18 @@ describe('benchmarks', () => {
     await initWebGPUBackend();
     numpyjsWebgpuBackend = createWebGPUBackend() as WebGPUBackend;
   });
+
+  it('autotunes all kernel variants at each size', async () => {
+    console.log('\n' + '='.repeat(70));
+    console.log('KERNEL AUTOTUNING: testing all variants per size');
+    console.log('='.repeat(70) + '\n');
+
+    for (const size of MATRIX_SIZES) {
+      console.log(`\n--- Autotuning ${size}x${size} ---`);
+      const winner = await numpyjsWebgpuBackend.autotune(size, size, size, 5);
+      console.log(`Best kernel for ${size}: ${winner}\n`);
+    }
+  }, 600000);
 
   it('benchmarks matmul at various sizes', async () => {
     const results: BenchmarkResult[] = [];
@@ -172,6 +185,7 @@ describe('benchmarks', () => {
       console.log('');
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).benchmarkResults = results;
     expect(results.length).toBeGreaterThan(0);
   }, 600000);
