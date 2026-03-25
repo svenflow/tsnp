@@ -398,6 +398,10 @@ export class JsBackend implements Backend {
     return new JsNDArray(arr.data.map(Math.abs), arr.shape);
   }
 
+  absolute(arr: NDArray): NDArray {
+    return this.abs(arr);
+  }
+
   sign(arr: NDArray): NDArray {
     return new JsNDArray(arr.data.map(Math.sign), arr.shape);
   }
@@ -1753,9 +1757,10 @@ export class JsBackend implements Backend {
 
   // ============ Stats ============
 
-  sum(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
+  sum(arr: NDArray, axis?: number, keepdims?: boolean, dtype?: DType): number | NDArray {
     if (axis !== undefined) {
-      const result = this.sumAxis(arr, axis);
+      let result = this.sumAxis(arr, axis);
+      if (dtype) result = this.astype(result, dtype);
       if (keepdims) {
         const newShape = [...arr.shape];
         newShape[axis] = 1;
@@ -1769,9 +1774,10 @@ export class JsBackend implements Backend {
     return s;
   }
 
-  prod(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
+  prod(arr: NDArray, axis?: number, keepdims?: boolean, dtype?: DType): number | NDArray {
     if (axis !== undefined) {
-      const result = this.prodAxis(arr, axis);
+      let result = this.prodAxis(arr, axis);
+      if (dtype) result = this.astype(result, dtype);
       if (keepdims) {
         const newShape = [...arr.shape];
         newShape[axis] = 1;
@@ -1785,9 +1791,10 @@ export class JsBackend implements Backend {
     return p;
   }
 
-  mean(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
+  mean(arr: NDArray, axis?: number, keepdims?: boolean, dtype?: DType): number | NDArray {
     if (axis !== undefined) {
-      const result = this.meanAxis(arr, axis);
+      let result = this.meanAxis(arr, axis);
+      if (dtype) result = this.astype(result, dtype);
       if (keepdims) {
         const newShape = [...arr.shape];
         newShape[axis] = 1;
@@ -1894,26 +1901,34 @@ export class JsBackend implements Backend {
     return maxIdx;
   }
 
-  cumsum(arr: NDArray, axis?: number): NDArray {
-    if (axis !== undefined) return this.cumsumAxis(arr, axis);
+  cumsum(arr: NDArray, axis?: number, dtype?: DType): NDArray {
+    if (axis !== undefined) {
+      const result = this.cumsumAxis(arr, axis);
+      return dtype ? this.astype(result, dtype) : result;
+    }
     const data = new Float64Array(arr.data.length);
     let sum = 0;
     for (let i = 0; i < arr.data.length; i++) {
       sum += arr.data[i];
       data[i] = sum;
     }
-    return new JsNDArray(data, arr.shape);
+    const result = new JsNDArray(data, arr.shape);
+    return dtype ? this.astype(result, dtype) : result;
   }
 
-  cumprod(arr: NDArray, axis?: number): NDArray {
-    if (axis !== undefined) return this.cumprodAxis(arr, axis);
+  cumprod(arr: NDArray, axis?: number, dtype?: DType): NDArray {
+    if (axis !== undefined) {
+      const result = this.cumprodAxis(arr, axis);
+      return dtype ? this.astype(result, dtype) : result;
+    }
     const data = new Float64Array(arr.data.length);
     let prod = 1;
     for (let i = 0; i < arr.data.length; i++) {
       prod *= arr.data[i];
       data[i] = prod;
     }
-    return new JsNDArray(data, arr.shape);
+    const result = new JsNDArray(data, arr.shape);
+    return dtype ? this.astype(result, dtype) : result;
   }
 
   all(arr: NDArray, axis?: number, keepdims?: boolean): boolean | NDArray {
@@ -3486,6 +3501,27 @@ export class JsBackend implements Backend {
     return new JsNDArray(result, outShape);
   }
 
+  put(arr: NDArray, ind: number[] | NDArray, v: number | number[]): void {
+    const indices = Array.isArray(ind) ? ind : Array.from(ind.data);
+    const vals = typeof v === 'number' ? [v] : v;
+    for (let i = 0; i < indices.length; i++) {
+      let idx = indices[i];
+      if (idx < 0) idx += arr.data.length;
+      arr.data[idx] = vals[i % vals.length];
+    }
+  }
+
+  ix_(...args: NDArray[]): NDArray[] {
+    const ndim = args.length;
+    const result: NDArray[] = [];
+    for (let i = 0; i < ndim; i++) {
+      const shape = new Array(ndim).fill(1);
+      shape[i] = args[i].data.length;
+      result.push(this.reshape(this.copy(args[i]), shape));
+    }
+    return result;
+  }
+
   // ============ Batched Operations ============
 
   batchedMatmul(a: NDArray, b: NDArray): NDArray {
@@ -4980,14 +5016,31 @@ export class JsBackend implements Backend {
     return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
   }
 
-  private static _quantileOfSorted(sorted: number[], q: number): number {
+  private static _quantileOfSorted(
+    sorted: number[],
+    q: number,
+    method: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest' = 'linear'
+  ): number {
     if (sorted.length === 0) return NaN;
     if (sorted.length === 1) return sorted[0];
     const pos = q * (sorted.length - 1);
     const lo = Math.floor(pos);
     const hi = Math.ceil(pos);
-    const frac = pos - lo;
-    return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+    switch (method) {
+      case 'lower':
+        return sorted[lo];
+      case 'higher':
+        return sorted[hi];
+      case 'midpoint':
+        return (sorted[lo] + sorted[hi]) / 2;
+      case 'nearest':
+        return pos - lo <= hi - pos ? sorted[lo] : sorted[hi];
+      case 'linear':
+      default: {
+        const frac = pos - lo;
+        return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+      }
+    }
   }
 
   median(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
@@ -5007,27 +5060,40 @@ export class JsBackend implements Backend {
     return JsBackend._medianOfSorted(sorted);
   }
 
-  percentile(arr: NDArray, q: number, axis?: number, keepdims?: boolean): number | NDArray {
+  percentile(
+    arr: NDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean,
+    method: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest' = 'linear'
+  ): number | NDArray {
     if (q < 0 || q > 100) throw new Error('percentile must be 0-100');
-    const result = this.quantile(arr, q / 100, axis);
-    if (keepdims && axis !== undefined && typeof result !== 'number') {
-      const newShape = [...arr.shape];
-      newShape[axis] = 1;
-      return this.reshape(result, newShape);
-    }
+    const result = this.quantile(arr, q / 100, axis, keepdims, method);
     return result;
   }
 
-  quantile(arr: NDArray, q: number, axis?: number): number | NDArray {
+  quantile(
+    arr: NDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean,
+    method: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest' = 'linear'
+  ): number | NDArray {
     if (q < 0 || q > 1) throw new Error('quantile must be 0-1');
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         const sorted = Array.from(vals).sort((a, b) => a - b);
-        return JsBackend._quantileOfSorted(sorted, q);
+        return JsBackend._quantileOfSorted(sorted, q, method);
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result as NDArray, newShape);
+      }
+      return result;
     }
     const sorted = this._sortedData(arr);
-    return JsBackend._quantileOfSorted(sorted, q);
+    return JsBackend._quantileOfSorted(sorted, q, method);
   }
 
   nanmedian(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
@@ -5049,14 +5115,20 @@ export class JsBackend implements Backend {
     return JsBackend._medianOfSorted(sorted);
   }
 
-  nanpercentile(arr: NDArray, q: number, axis?: number, keepdims?: boolean): number | NDArray {
+  nanpercentile(
+    arr: NDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean,
+    method: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest' = 'linear'
+  ): number | NDArray {
     if (q < 0 || q > 100) throw new Error('percentile must be 0-100');
     if (axis !== undefined) {
       const result = this._reduceAlongAxis(arr, axis, vals => {
         const sorted = Array.from(vals)
           .filter(x => !Number.isNaN(x))
           .sort((a, b) => a - b);
-        return JsBackend._quantileOfSorted(sorted, q / 100);
+        return JsBackend._quantileOfSorted(sorted, q / 100, method);
       });
       if (keepdims) {
         const newShape = [...arr.shape];
@@ -5066,13 +5138,7 @@ export class JsBackend implements Backend {
       return result;
     }
     const sorted = this._sortedNonNaN(arr);
-    if (sorted.length === 0) return NaN;
-    if (sorted.length === 1) return sorted[0];
-    const pos = (q / 100) * (sorted.length - 1);
-    const lo = Math.floor(pos);
-    const hi = Math.ceil(pos);
-    const frac = pos - lo;
-    return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+    return JsBackend._quantileOfSorted(sorted, q / 100, method);
   }
 
   // ============ Histogram ============
@@ -6971,26 +7037,29 @@ export class JsBackend implements Backend {
     return new JsNDArray(data, [...x.shape]);
   }
 
-  nanquantile(arr: NDArray, q: number, axis?: number): number | NDArray {
+  nanquantile(
+    arr: NDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean,
+    method: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest' = 'linear'
+  ): number | NDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         const nonNaN = Array.from(vals).filter(x => !isNaN(x));
         if (nonNaN.length === 0) return NaN;
         const sorted = nonNaN.sort((a, b) => a - b);
-        const pos = q * (sorted.length - 1);
-        const lo = Math.floor(pos);
-        const hi = Math.ceil(pos);
-        if (lo === hi) return sorted[lo];
-        return sorted[lo] * (hi - pos) + sorted[hi] * (pos - lo);
+        return JsBackend._quantileOfSorted(sorted, q, method);
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result as NDArray, newShape);
+      }
+      return result;
     }
     const sorted = this._sortedNonNaN(arr);
-    if (sorted.length === 0) return NaN;
-    const pos = q * (sorted.length - 1);
-    const lo = Math.floor(pos);
-    const hi = Math.ceil(pos);
-    if (lo === hi) return sorted[lo];
-    return sorted[lo] * (hi - pos) + sorted[hi] * (pos - lo);
+    return JsBackend._quantileOfSorted(sorted, q, method);
   }
 
   nancumsum(arr: NDArray, axis?: number): NDArray {
@@ -7221,7 +7290,7 @@ export class JsBackend implements Backend {
 
   // ============ Integration ============
 
-  trapezoid(y: NDArray, x?: NDArray): number {
+  trapezoid(y: NDArray, x?: NDArray, dx: number = 1): number {
     const n = y.data.length;
     if (n < 2) return 0;
     let sum = 0;
@@ -7231,10 +7300,14 @@ export class JsBackend implements Backend {
       }
     } else {
       for (let i = 0; i < n - 1; i++) {
-        sum += 0.5 * (y.data[i] + y.data[i + 1]);
+        sum += 0.5 * (y.data[i] + y.data[i + 1]) * dx;
       }
     }
     return sum;
+  }
+
+  trapz(y: NDArray, x?: NDArray, dx?: number): number {
+    return this.trapezoid(y, x, dx);
   }
 
   // ============ Index Utilities ============

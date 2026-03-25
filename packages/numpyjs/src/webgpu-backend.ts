@@ -8018,6 +8018,10 @@ export class WebGPUBackend implements Backend {
     return this.fromTensor(this.runUnaryOpOnTensor(tensor, 'abs'));
   }
 
+  absolute(arr: IFaceNDArray): IFaceNDArray {
+    return this.abs(arr);
+  }
+
   sign(arr: IFaceNDArray): IFaceNDArray {
     const tensor = this.toTensor(arr);
     return this.fromTensor(this.runUnaryOpOnTensor(tensor, 'sign'));
@@ -8355,9 +8359,10 @@ export class WebGPUBackend implements Backend {
 
   // ============ Stats Operations ============
 
-  sum(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
+  sum(arr: IFaceNDArray, axis?: number, keepdims?: boolean, dtype?: DType): number | IFaceNDArray {
     if (axis !== undefined) {
-      const result = this.sumAxis(arr, axis);
+      let result = this.sumAxis(arr, axis);
+      if (dtype) result = this.astype(result, dtype);
       if (keepdims) {
         const newShape = [...arr.shape];
         newShape[axis] = 1;
@@ -8370,9 +8375,10 @@ export class WebGPUBackend implements Backend {
     return sum;
   }
 
-  prod(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
+  prod(arr: IFaceNDArray, axis?: number, keepdims?: boolean, dtype?: DType): number | IFaceNDArray {
     if (axis !== undefined) {
-      const result = this.prodAxis(arr, axis);
+      let result = this.prodAxis(arr, axis);
+      if (dtype) result = this.astype(result, dtype);
       if (keepdims) {
         const newShape = [...arr.shape];
         newShape[axis] = 1;
@@ -8386,9 +8392,10 @@ export class WebGPUBackend implements Backend {
     return prod;
   }
 
-  mean(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
+  mean(arr: IFaceNDArray, axis?: number, keepdims?: boolean, dtype?: DType): number | IFaceNDArray {
     if (axis !== undefined) {
-      const result = this.meanAxis(arr, axis);
+      let result = this.meanAxis(arr, axis);
+      if (dtype) result = this.astype(result, dtype);
       if (keepdims) {
         const newShape = [...arr.shape];
         newShape[axis] = 1;
@@ -8516,16 +8523,24 @@ export class WebGPUBackend implements Backend {
     return maxIdx;
   }
 
-  cumsum(arr: IFaceNDArray, axis?: number): IFaceNDArray {
-    if (axis !== undefined) return this.cumsumAxis(arr, axis);
+  cumsum(arr: IFaceNDArray, axis?: number, dtype?: DType): IFaceNDArray {
+    if (axis !== undefined) {
+      const result = this.cumsumAxis(arr, axis);
+      return dtype ? this.astype(result, dtype) : result;
+    }
     const tensor = this.toTensor(arr);
-    return this.fromTensor(this.runCumulativeOnTensor(tensor, 'cumsum'));
+    const result = this.fromTensor(this.runCumulativeOnTensor(tensor, 'cumsum'));
+    return dtype ? this.astype(result, dtype) : result;
   }
 
-  cumprod(arr: IFaceNDArray, axis?: number): IFaceNDArray {
-    if (axis !== undefined) return this.cumprodAxis(arr, axis);
+  cumprod(arr: IFaceNDArray, axis?: number, dtype?: DType): IFaceNDArray {
+    if (axis !== undefined) {
+      const result = this.cumprodAxis(arr, axis);
+      return dtype ? this.astype(result, dtype) : result;
+    }
     const tensor = this.toTensor(arr);
-    return this.fromTensor(this.runCumulativeOnTensor(tensor, 'cumprod'));
+    const result = this.fromTensor(this.runCumulativeOnTensor(tensor, 'cumprod'));
+    return dtype ? this.astype(result, dtype) : result;
   }
 
   all(arr: IFaceNDArray, axis?: number, keepdims?: boolean): boolean | IFaceNDArray {
@@ -11957,6 +11972,27 @@ export class WebGPUBackend implements Backend {
     return this.createArray(result, outShape);
   }
 
+  put(arr: IFaceNDArray, ind: number[] | IFaceNDArray, v: number | number[]): void {
+    const indices = Array.isArray(ind) ? ind : Array.from(ind.data);
+    const vals = typeof v === 'number' ? [v] : v;
+    for (let i = 0; i < indices.length; i++) {
+      let idx = indices[i];
+      if (idx < 0) idx += arr.data.length;
+      arr.data[idx] = vals[i % vals.length];
+    }
+  }
+
+  ix_(...args: IFaceNDArray[]): IFaceNDArray[] {
+    const ndim = args.length;
+    const result: IFaceNDArray[] = [];
+    for (let i = 0; i < ndim; i++) {
+      const shape = new Array(ndim).fill(1);
+      shape[i] = args[i].data.length;
+      result.push(this.reshape(this.copy(args[i]), shape));
+    }
+    return result;
+  }
+
   partition(arr: IFaceNDArray, kth: number, axis: number = -1): IFaceNDArray {
     const ndim = arr.shape.length;
     axis = axis < 0 ? axis + ndim : axis;
@@ -15269,14 +15305,31 @@ ${productCode}
     return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
   }
 
-  private static _quantileOfSorted(sorted: number[], q: number): number {
+  private static _quantileOfSorted(
+    sorted: number[],
+    q: number,
+    method: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest' = 'linear'
+  ): number {
     if (sorted.length === 0) return NaN;
     if (sorted.length === 1) return sorted[0];
     const pos = q * (sorted.length - 1);
     const lo = Math.floor(pos);
     const hi = Math.ceil(pos);
-    const frac = pos - lo;
-    return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+    switch (method) {
+      case 'lower':
+        return sorted[lo];
+      case 'higher':
+        return sorted[hi];
+      case 'midpoint':
+        return (sorted[lo] + sorted[hi]) / 2;
+      case 'nearest':
+        return pos - lo <= hi - pos ? sorted[lo] : sorted[hi];
+      case 'linear':
+      default: {
+        const frac = pos - lo;
+        return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+      }
+    }
   }
 
   median(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
@@ -15300,28 +15353,35 @@ ${productCode}
     arr: IFaceNDArray,
     q: number,
     axis?: number,
-    keepdims?: boolean
+    keepdims?: boolean,
+    method: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest' = 'linear'
   ): number | IFaceNDArray {
     if (q < 0 || q > 100) throw new Error('percentile must be 0-100');
-    const result = this.quantile(arr, q / 100, axis);
-    if (keepdims && axis !== undefined && typeof result !== 'number') {
-      const newShape = [...arr.shape];
-      newShape[axis] = 1;
-      return this.reshape(result, newShape);
-    }
-    return result;
+    return this.quantile(arr, q / 100, axis, keepdims, method);
   }
 
-  quantile(arr: IFaceNDArray, q: number, axis?: number): number | IFaceNDArray {
+  quantile(
+    arr: IFaceNDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean,
+    method: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest' = 'linear'
+  ): number | IFaceNDArray {
     if (q < 0 || q > 1) throw new Error('quantile must be 0-1');
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         const sorted = Array.from(vals).sort((a, b) => a - b);
-        return WebGPUBackend._quantileOfSorted(sorted, q);
+        return WebGPUBackend._quantileOfSorted(sorted, q, method);
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result as IFaceNDArray, newShape);
+      }
+      return result;
     }
     const sorted = Array.from(arr.data).sort((a, b) => a - b);
-    return WebGPUBackend._quantileOfSorted(sorted, q);
+    return WebGPUBackend._quantileOfSorted(sorted, q, method);
   }
 
   nanmedian(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
@@ -15349,7 +15409,8 @@ ${productCode}
     arr: IFaceNDArray,
     q: number,
     axis?: number,
-    keepdims?: boolean
+    keepdims?: boolean,
+    method: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest' = 'linear'
   ): number | IFaceNDArray {
     if (q < 0 || q > 100) throw new Error('percentile must be 0-100');
     if (axis !== undefined) {
@@ -15357,7 +15418,7 @@ ${productCode}
         const sorted = Array.from(vals)
           .filter(x => !Number.isNaN(x))
           .sort((a, b) => a - b);
-        return WebGPUBackend._quantileOfSorted(sorted, q / 100);
+        return WebGPUBackend._quantileOfSorted(sorted, q / 100, method);
       });
       if (keepdims) {
         const newShape = [...arr.shape];
@@ -15369,7 +15430,7 @@ ${productCode}
     const nonNaN = Array.from(arr.data).filter(x => !Number.isNaN(x));
     if (nonNaN.length === 0) return NaN;
     const sorted = nonNaN.sort((a, b) => a - b);
-    return WebGPUBackend._quantileOfSorted(sorted, q / 100);
+    return WebGPUBackend._quantileOfSorted(sorted, q / 100, method);
   }
 
   // ============ Histogram ============
@@ -17268,29 +17329,31 @@ ${productCode}
     return this.createArray(data, [...x.shape]);
   }
 
-  nanquantile(arr: IFaceNDArray, q: number, axis?: number): number | IFaceNDArray {
+  nanquantile(
+    arr: IFaceNDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean,
+    method: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest' = 'linear'
+  ): number | IFaceNDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         const nonNaN = Array.from(vals).filter(x => !Number.isNaN(x));
         if (nonNaN.length === 0) return NaN;
         const sorted = nonNaN.sort((a, b) => a - b);
-        const idx = q * (sorted.length - 1);
-        const lower = Math.floor(idx);
-        const upper = Math.ceil(idx);
-        if (lower === upper) return sorted[lower];
-        const frac = idx - lower;
-        return sorted[lower] * (1 - frac) + sorted[upper] * frac;
+        return WebGPUBackend._quantileOfSorted(sorted, q, method);
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result as IFaceNDArray, newShape);
+      }
+      return result;
     }
     const nonNaN = Array.from(arr.data).filter(x => !Number.isNaN(x));
     if (nonNaN.length === 0) return NaN;
     const sorted = nonNaN.sort((a, b) => a - b);
-    const idx = q * (sorted.length - 1);
-    const lower = Math.floor(idx);
-    const upper = Math.ceil(idx);
-    if (lower === upper) return sorted[lower];
-    const frac = idx - lower;
-    return sorted[lower] * (1 - frac) + sorted[upper] * frac;
+    return WebGPUBackend._quantileOfSorted(sorted, q, method);
   }
 
   nancumsum(arr: IFaceNDArray, axis?: number): IFaceNDArray {
@@ -17511,7 +17574,7 @@ ${productCode}
 
   // ============ Integration ============
 
-  trapezoid(y: IFaceNDArray, x?: IFaceNDArray): number {
+  trapezoid(y: IFaceNDArray, x?: IFaceNDArray, dx: number = 1): number {
     const n = y.data.length;
     if (n < 2) return 0;
     let sum = 0;
@@ -17521,10 +17584,14 @@ ${productCode}
       }
     } else {
       for (let i = 1; i < n; i++) {
-        sum += (y.data[i] + y.data[i - 1]) / 2;
+        sum += ((y.data[i] + y.data[i - 1]) / 2) * dx;
       }
     }
     return sum;
+  }
+
+  trapz(y: IFaceNDArray, x?: IFaceNDArray, dx?: number): number {
+    return this.trapezoid(y, x, dx);
   }
 
   // ============ Index Utilities ============

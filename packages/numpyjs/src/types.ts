@@ -162,6 +162,8 @@ export interface Backend {
   sqrt(arr: NDArray): NDArray;
   cbrt(arr: NDArray): NDArray;
   abs(arr: NDArray): NDArray;
+  /** np.absolute — alias for abs */
+  absolute(arr: NDArray): NDArray;
   sign(arr: NDArray): NDArray;
   floor(arr: NDArray): NDArray;
   ceil(arr: NDArray): NDArray;
@@ -293,9 +295,9 @@ export interface Backend {
   clip(arr: NDArray, min: number | null, max: number | null): NDArray;
 
   // ============ Stats (NumPy-style with optional axis) ============
-  sum(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
-  prod(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
-  mean(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
+  sum(arr: NDArray, axis?: number, keepdims?: boolean, dtype?: DType): number | NDArray;
+  prod(arr: NDArray, axis?: number, keepdims?: boolean, dtype?: DType): number | NDArray;
+  mean(arr: NDArray, axis?: number, keepdims?: boolean, dtype?: DType): number | NDArray;
   /** np.var — variance. var(arr, axis?, ddof?, keepdims?) matches NumPy param order */
   var(arr: NDArray, axis?: number | null, ddof?: number, keepdims?: boolean): number | NDArray;
   /** np.std — standard deviation. std(arr, axis?, ddof?, keepdims?) matches NumPy param order */
@@ -304,8 +306,8 @@ export interface Backend {
   max(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
   argmin(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
   argmax(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
-  cumsum(arr: NDArray, axis?: number): NDArray;
-  cumprod(arr: NDArray, axis?: number): NDArray;
+  cumsum(arr: NDArray, axis?: number, dtype?: DType): NDArray;
+  cumprod(arr: NDArray, axis?: number, dtype?: DType): NDArray;
   all(arr: NDArray, axis?: number, keepdims?: boolean): boolean | NDArray;
   any(arr: NDArray, axis?: number, keepdims?: boolean): boolean | NDArray;
   /** @deprecated Use sum(arr, axis) instead */
@@ -348,10 +350,28 @@ export interface Backend {
 
   // ============ Order Statistics ============
   median(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
-  percentile(arr: NDArray, q: number, axis?: number, keepdims?: boolean): number | NDArray;
-  quantile(arr: NDArray, q: number, axis?: number): number | NDArray;
+  percentile(
+    arr: NDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean,
+    method?: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest'
+  ): number | NDArray;
+  quantile(
+    arr: NDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean,
+    method?: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest'
+  ): number | NDArray;
   nanmedian(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
-  nanpercentile(arr: NDArray, q: number, axis?: number, keepdims?: boolean): number | NDArray;
+  nanpercentile(
+    arr: NDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean,
+    method?: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest'
+  ): number | NDArray;
 
   // ============ Histogram ============
   histogram(
@@ -405,6 +425,10 @@ export interface Backend {
 
   // ============ Advanced Indexing ============
   take(arr: NDArray, indices: NDArray | number[], axis?: number): NDArray;
+  /** np.put — set elements at flat indices (mutates arr in place) */
+  put(arr: NDArray, ind: number[] | NDArray, v: number | number[]): void;
+  /** np.ix_ — construct open mesh from multiple sequences */
+  ix_(...args: NDArray[]): NDArray[];
 
   // ============ Batched Operations ============
   batchedMatmul(a: NDArray, b: NDArray): NDArray;
@@ -620,7 +644,13 @@ export interface Backend {
   average(arr: NDArray, weights?: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
   ptp(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
   digitize(x: NDArray, bins: NDArray, right?: boolean): NDArray;
-  nanquantile(arr: NDArray, q: number, axis?: number): number | NDArray;
+  nanquantile(
+    arr: NDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean,
+    method?: 'linear' | 'lower' | 'higher' | 'midpoint' | 'nearest'
+  ): number | NDArray;
   nancumsum(arr: NDArray, axis?: number): NDArray;
   nancumprod(arr: NDArray, axis?: number): NDArray;
   uniqueCounts(arr: NDArray): { values: NDArray; counts: NDArray };
@@ -645,7 +675,9 @@ export interface Backend {
   polysub(a: NDArray, b: NDArray): NDArray;
 
   // ============ Integration ============
-  trapezoid(y: NDArray, x?: NDArray): number;
+  trapezoid(y: NDArray, x?: NDArray, dx?: number): number;
+  /** @deprecated Use trapezoid() instead — np.trapz alias */
+  trapz(y: NDArray, x?: NDArray, dx?: number): number;
 
   // ============ Index Utilities ============
   /** np.unravel_index — convert flat index to multi-dimensional index */
