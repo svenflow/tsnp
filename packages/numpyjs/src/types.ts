@@ -65,6 +65,17 @@ export function promoteDTypes(a: DType, b: DType): DType {
   return (intRank[a] || 0) >= (intRank[b] || 0) ? a : b;
 }
 
+// ============ Histogram Bin Strategies ============
+
+/** Bin selection algorithm strings, matching NumPy */
+export type BinStrategy = 'auto' | 'fd' | 'sturges' | 'rice' | 'sqrt' | 'scott' | 'doane';
+
+/** Bins parameter: number of bins, explicit edges, or algorithm name */
+export type BinsParam = number | NDArray | BinStrategy;
+
+/** Sort algorithm kind — all map to JS native sort, but signature matches NumPy */
+export type SortKind = 'quicksort' | 'mergesort' | 'heapsort' | 'stable';
+
 // ============ Scalar Broadcasting ============
 
 /** An NDArray or a scalar number — used for binary op arguments */
@@ -345,12 +356,12 @@ export interface Backend {
   // ============ Histogram ============
   histogram(
     arr: NDArray,
-    bins?: number,
+    bins?: BinsParam,
     range?: [number, number] | null,
     density?: boolean,
     weights?: NDArray
   ): { hist: NDArray; binEdges: NDArray };
-  histogramBinEdges(arr: NDArray, bins?: number): NDArray;
+  histogramBinEdges(arr: NDArray, bins?: BinsParam): NDArray;
 
   // ============ Linalg ============
   matmul(a: NDArray, b: NDArray): NDArray;
@@ -367,10 +378,10 @@ export interface Backend {
   svd(arr: NDArray, fullMatrices?: boolean): { u: NDArray; s: NDArray; vt: NDArray };
 
   // ============ Creation - Like Functions ============
-  zerosLike(arr: NDArray): NDArray;
-  onesLike(arr: NDArray): NDArray;
-  emptyLike(arr: NDArray): NDArray;
-  fullLike(arr: NDArray, value: number): NDArray;
+  zerosLike(arr: NDArray, dtype?: DType): NDArray;
+  onesLike(arr: NDArray, dtype?: DType): NDArray;
+  emptyLike(arr: NDArray, dtype?: DType): NDArray;
+  fullLike(arr: NDArray, value: number, dtype?: DType): NDArray;
 
   // ============ Broadcasting ============
   broadcastTo(arr: NDArray, shape: number[]): NDArray;
@@ -382,6 +393,8 @@ export interface Backend {
   squeeze(arr: NDArray, axis?: number | number[]): NDArray;
   expandDims(arr: NDArray, axis: number): NDArray;
   reshape(arr: NDArray, shape: number[]): NDArray;
+  /** np.resize — resize array with repetition to fill new shape */
+  resize(arr: NDArray, newShape: number[]): NDArray;
   flatten(arr: NDArray): NDArray;
   concatenate(arrays: NDArray[], axis?: number | null): NDArray;
   stack(arrays: NDArray[], axis?: number): NDArray;
@@ -407,7 +420,7 @@ export interface Backend {
     prepend?: NDArray | number,
     append?: NDArray | number
   ): NDArray;
-  gradient(arr: NDArray, axis?: number): NDArray;
+  gradient(arr: NDArray, axis?: number, edgeOrder?: 1 | 2): NDArray;
   ediff1d(arr: NDArray): NDArray;
 
   // ============ Cross Product ============
@@ -440,6 +453,8 @@ export interface Backend {
 
   // ============ Stacking Shortcuts ============
   vstack(arrays: NDArray[]): NDArray;
+  /** np.row_stack — alias for vstack */
+  rowStack(arrays: NDArray[]): NDArray;
   hstack(arrays: NDArray[]): NDArray;
   dstack(arrays: NDArray[]): NDArray;
 
@@ -461,9 +476,14 @@ export interface Backend {
   nanToNum(arr: NDArray, nan?: number, posInf?: number, negInf?: number): NDArray;
 
   // ============ Sorting ============
-  sort(arr: NDArray, axis?: number): NDArray;
-  argsort(arr: NDArray, axis?: number): NDArray;
-  searchsorted(arr: NDArray, v: number | NDArray, side?: 'left' | 'right'): NDArray | number;
+  sort(arr: NDArray, axis?: number, kind?: SortKind): NDArray;
+  argsort(arr: NDArray, axis?: number, kind?: SortKind): NDArray;
+  searchsorted(
+    arr: NDArray,
+    v: number | NDArray,
+    side?: 'left' | 'right',
+    sorter?: NDArray
+  ): NDArray | number;
   unique(
     arr: NDArray,
     returnIndex?: boolean,
@@ -500,7 +520,7 @@ export interface Backend {
   rightShift(a: ArrayOrScalar, b: ArrayOrScalar): NDArray;
 
   // ============ Array Manipulation (Additional) ============
-  copy(arr: NDArray): NDArray;
+  copy(arr: NDArray, dtype?: DType): NDArray;
   empty(shape: number[], dtype?: DType): NDArray;
   flip(arr: NDArray, axis?: number): NDArray;
   fliplr(arr: NDArray): NDArray;
@@ -577,6 +597,24 @@ export interface Backend {
   dirichlet(alpha: number[], size?: number): NDArray;
   /** np.random.random — alias for rand */
   random(shape: number[]): NDArray;
+  /** np.random.f — F-distribution */
+  f(dfnum: number, dfden: number, shape: number[]): NDArray;
+  /** np.random.hypergeometric — hypergeometric distribution */
+  hypergeometric(ngood: number, nbad: number, nsample: number, shape: number[]): NDArray;
+  /** np.random.negative_binomial — negative binomial distribution */
+  negativeBinomial(n: number, p: number, shape: number[]): NDArray;
+  /** np.random.pareto — Pareto distribution */
+  pareto(a: number, shape: number[]): NDArray;
+  /** np.random.rayleigh — Rayleigh distribution */
+  rayleigh(scale: number, shape: number[]): NDArray;
+  /** np.random.triangular — triangular distribution */
+  triangular(left: number, mode: number, right: number, shape: number[]): NDArray;
+  /** np.random.vonmises — von Mises distribution */
+  vonmises(mu: number, kappa: number, shape: number[]): NDArray;
+  /** np.random.wald — Wald (inverse Gaussian) distribution */
+  wald(mean: number, scale: number, shape: number[]): NDArray;
+  /** np.random.zipf — Zipf distribution */
+  zipf(a: number, shape: number[]): NDArray;
 
   // ============ Additional Stats ============
   average(arr: NDArray, weights?: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
@@ -590,7 +628,10 @@ export interface Backend {
   histogram2d(
     x: NDArray,
     y: NDArray,
-    bins?: number
+    bins?: number,
+    range?: [[number, number], [number, number]] | null,
+    density?: boolean,
+    weights?: NDArray
   ): { hist: NDArray; xEdges: NDArray; yEdges: NDArray };
 
   // ============ Additional Comparison ============
@@ -625,6 +666,8 @@ export interface Backend {
   diagflat(v: NDArray, k?: number): NDArray;
   /** np.block — assemble arrays from nested blocks */
   block(arrays: (NDArray | NDArray[])[]): NDArray;
+  /** np.fill_diagonal — fill diagonal of matrix with a value */
+  fillDiagonal(arr: NDArray, val: number, wrap?: boolean): NDArray;
 
   // ============ Index Arrays ============
   /** np.indices — return an array representing grid indices */

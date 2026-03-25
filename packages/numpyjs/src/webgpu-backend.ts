@@ -22,6 +22,8 @@ import {
   DType,
   AnyTypedArray,
   ArrayOrScalar,
+  BinsParam,
+  SortKind,
   DEFAULT_DTYPE,
   createTypedArray,
   createTypedArrayFrom,
@@ -11471,20 +11473,20 @@ export class WebGPUBackend implements Backend {
 
   // ============ Creation - Like Functions ============
 
-  zerosLike(arr: IFaceNDArray): IFaceNDArray {
-    return this.zeros(arr.shape, arr.dtype);
+  zerosLike(arr: IFaceNDArray, dtype?: DType): IFaceNDArray {
+    return this.zeros(arr.shape, dtype ?? arr.dtype);
   }
 
-  onesLike(arr: IFaceNDArray): IFaceNDArray {
-    return this.ones(arr.shape, arr.dtype);
+  onesLike(arr: IFaceNDArray, dtype?: DType): IFaceNDArray {
+    return this.ones(arr.shape, dtype ?? arr.dtype);
   }
 
-  emptyLike(arr: IFaceNDArray): IFaceNDArray {
-    return this.zeros(arr.shape, arr.dtype);
+  emptyLike(arr: IFaceNDArray, dtype?: DType): IFaceNDArray {
+    return this.zeros(arr.shape, dtype ?? arr.dtype);
   }
 
-  fullLike(arr: IFaceNDArray, value: number): IFaceNDArray {
-    return this.full(arr.shape, value, arr.dtype);
+  fullLike(arr: IFaceNDArray, value: number, dtype?: DType): IFaceNDArray {
+    return this.full(arr.shape, value, dtype ?? arr.dtype);
   }
 
   // ============ Broadcasting ============
@@ -11707,6 +11709,19 @@ export class WebGPUBackend implements Backend {
     }
 
     return this.createArray(arr.data.slice(), newShape);
+  }
+
+  resize(arr: IFaceNDArray, newShape: number[]): IFaceNDArray {
+    const newSize = newShape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(newSize);
+    const srcLen = arr.data.length;
+    if (srcLen === 0) {
+      return this.createArray(data, [...newShape]);
+    }
+    for (let i = 0; i < newSize; i++) {
+      data[i] = arr.data[i % srcLen];
+    }
+    return this.createArray(data, [...newShape]);
   }
 
   flatten(arr: IFaceNDArray): IFaceNDArray {
@@ -12911,7 +12926,7 @@ ${productCode}
     return this.createArray(result, newShape);
   }
 
-  gradient(arr: IFaceNDArray, axis: number = -1): IFaceNDArray {
+  gradient(arr: IFaceNDArray, axis: number = -1, edgeOrder: 1 | 2 = 1): IFaceNDArray {
     const ndim = arr.shape.length;
     axis = this._normalizeAxis(axis, ndim);
     const shape = arr.shape;
@@ -12920,9 +12935,19 @@ ${productCode}
     if (axisLen < 2) {
       throw new Error('gradient requires at least 2 elements along axis');
     }
+    if (edgeOrder === 2 && axisLen < 3) {
+      throw new Error('gradient with edge_order=2 requires at least 3 elements along axis');
+    }
 
     const result = new Float64Array(arr.data.length);
     const strides = this._computeStrides(shape);
+
+    // Helper to get flat index from coords
+    const flatIdx = (coords: number[]) => {
+      let idx = 0;
+      for (let d = 0; d < ndim; d++) idx += coords[d] * strides[d];
+      return idx;
+    };
 
     for (let i = 0; i < arr.data.length; i++) {
       const coords = new Array(ndim);
@@ -12936,29 +12961,38 @@ ${productCode}
       let grad: number;
 
       if (axisCoord === 0) {
-        const nextCoords = [...coords];
-        nextCoords[axis] = 1;
-        let nextIdx = 0;
-        for (let d = 0; d < ndim; d++) nextIdx += nextCoords[d] * strides[d];
-        grad = arr.data[nextIdx] - arr.data[i];
+        if (edgeOrder === 2) {
+          // Second-order accurate forward: (-3f0 + 4f1 - f2) / 2
+          const c1 = [...coords];
+          c1[axis] = 1;
+          const c2 = [...coords];
+          c2[axis] = 2;
+          grad = (-3 * arr.data[i] + 4 * arr.data[flatIdx(c1)] - arr.data[flatIdx(c2)]) / 2;
+        } else {
+          const nextCoords = [...coords];
+          nextCoords[axis] = 1;
+          grad = arr.data[flatIdx(nextCoords)] - arr.data[i];
+        }
       } else if (axisCoord === axisLen - 1) {
-        const prevCoords = [...coords];
-        prevCoords[axis] = axisLen - 2;
-        let prevIdx = 0;
-        for (let d = 0; d < ndim; d++) prevIdx += prevCoords[d] * strides[d];
-        grad = arr.data[i] - arr.data[prevIdx];
+        if (edgeOrder === 2) {
+          // Second-order accurate backward: (3fN - 4fN-1 + fN-2) / 2
+          const c1 = [...coords];
+          c1[axis] = axisLen - 2;
+          const c2 = [...coords];
+          c2[axis] = axisLen - 3;
+          grad = (3 * arr.data[i] - 4 * arr.data[flatIdx(c1)] + arr.data[flatIdx(c2)]) / 2;
+        } else {
+          const prevCoords = [...coords];
+          prevCoords[axis] = axisLen - 2;
+          grad = arr.data[i] - arr.data[flatIdx(prevCoords)];
+        }
       } else {
+        // Central difference (same for both edge orders)
         const prevCoords = [...coords];
         const nextCoords = [...coords];
         prevCoords[axis] = axisCoord - 1;
         nextCoords[axis] = axisCoord + 1;
-        let prevIdx = 0,
-          nextIdx = 0;
-        for (let d = 0; d < ndim; d++) {
-          prevIdx += prevCoords[d] * strides[d];
-          nextIdx += nextCoords[d] * strides[d];
-        }
-        grad = (arr.data[nextIdx] - arr.data[prevIdx]) / 2;
+        grad = (arr.data[flatIdx(nextCoords)] - arr.data[flatIdx(prevCoords)]) / 2;
       }
 
       result[i] = grad;
@@ -13376,6 +13410,10 @@ ${productCode}
     return this.concatenate(processed, 0);
   }
 
+  rowStack(arrays: IFaceNDArray[]): IFaceNDArray {
+    return this.vstack(arrays);
+  }
+
   hstack(arrays: IFaceNDArray[]): IFaceNDArray {
     if (arrays[0].shape.length === 1) {
       return this.concatenate(arrays, 0);
@@ -13574,7 +13612,7 @@ ${productCode}
   // For 1D arrays: uses GPU bitonic sort (O(n log^2 n) parallel)
   // For multi-dim with axis: extracts slices, sorts on GPU, writes back
 
-  sort(arr: IFaceNDArray, axis: number = -1): IFaceNDArray {
+  sort(arr: IFaceNDArray, axis: number = -1, _kind?: SortKind): IFaceNDArray {
     const ndim = arr.shape.length;
     axis = this._normalizeAxis(axis, ndim);
     const shape = arr.shape;
@@ -13665,7 +13703,7 @@ ${productCode}
 
   // argsort - returns indices that would sort the array
   // Uses native TypeScript argsort implementation
-  argsort(arr: IFaceNDArray, axis: number = -1): IFaceNDArray {
+  argsort(arr: IFaceNDArray, axis: number = -1, _kind?: SortKind): IFaceNDArray {
     const ndim = arr.shape.length;
     axis = this._normalizeAxis(axis, ndim);
     const shape = arr.shape;
@@ -13755,10 +13793,21 @@ ${productCode}
   searchsorted(
     arr: IFaceNDArray,
     v: number | IFaceNDArray,
-    side: 'left' | 'right' = 'left'
+    side: 'left' | 'right' = 'left',
+    sorter?: IFaceNDArray
   ): IFaceNDArray | number {
     const flat = this.flatten(arr);
-    const data = flat.data;
+    // If sorter is provided, reindex the array through the sorter permutation
+    let data: AnyTypedArray;
+    if (sorter) {
+      const sortedData = new Float64Array(flat.data.length);
+      for (let i = 0; i < flat.data.length; i++) {
+        sortedData[i] = flat.data[sorter.data[i]];
+      }
+      data = sortedData;
+    } else {
+      data = flat.data;
+    }
 
     const search = (val: number): number => {
       let lo = 0,
@@ -15325,14 +15374,128 @@ ${productCode}
 
   // ============ Histogram ============
 
+  private _computeOptimalBins(data: AnyTypedArray, strategy: string): number {
+    const valid: number[] = [];
+    for (let i = 0; i < data.length; i++) {
+      if (!Number.isNaN(data[i])) valid.push(data[i]);
+    }
+    const n = valid.length;
+    if (n === 0) return 10;
+
+    valid.sort((a, b) => a - b);
+    const min = valid[0];
+    const max = valid[n - 1];
+    const range = max - min || 1;
+
+    const q1Idx = Math.floor(n * 0.25);
+    const q3Idx = Math.floor(n * 0.75);
+    const iqr = valid[q3Idx] - valid[q1Idx];
+
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += valid[i];
+    const mean = sum / n;
+    let variance = 0;
+    for (let i = 0; i < n; i++) variance += (valid[i] - mean) ** 2;
+    const std = Math.sqrt(variance / n);
+
+    switch (strategy) {
+      case 'sqrt':
+        return Math.max(1, Math.ceil(Math.sqrt(n)));
+      case 'sturges':
+        return Math.max(1, Math.ceil(Math.log2(n) + 1));
+      case 'rice':
+        return Math.max(1, Math.ceil(2 * Math.cbrt(n)));
+      case 'scott': {
+        const h = 3.5 * std * Math.pow(n, -1 / 3);
+        return Math.max(1, Math.ceil(range / (h || 1)));
+      }
+      case 'fd': {
+        const h = 2 * iqr * Math.pow(n, -1 / 3);
+        return Math.max(1, Math.ceil(range / (h || 1)));
+      }
+      case 'doane': {
+        if (n < 3) return 1;
+        let g1 = 0;
+        for (let i = 0; i < n; i++) g1 += ((valid[i] - mean) / (std || 1)) ** 3;
+        g1 /= n;
+        const sigmaG1 = Math.sqrt((6 * (n - 2)) / ((n + 1) * (n + 3)));
+        return Math.max(
+          1,
+          Math.ceil(1 + Math.log2(n) + Math.log2(1 + Math.abs(g1) / (sigmaG1 || 1)))
+        );
+      }
+      case 'auto': {
+        const sturges = Math.max(1, Math.ceil(Math.log2(n) + 1));
+        const hFd = 2 * iqr * Math.pow(n, -1 / 3);
+        const fd = hFd > 0 ? Math.max(1, Math.ceil(range / hFd)) : sturges;
+        return Math.max(sturges, fd);
+      }
+      default:
+        return 10;
+    }
+  }
+
   histogram(
     arr: IFaceNDArray,
-    bins: number = 10,
+    bins: BinsParam = 10,
     range?: [number, number] | null,
     density?: boolean,
     weights?: IFaceNDArray
   ): { hist: IFaceNDArray; binEdges: IFaceNDArray } {
     const data = arr.data;
+
+    // If bins is an NDArray, use those as bin edges directly
+    if (typeof bins === 'object' && bins !== null && 'data' in bins) {
+      const edges = bins as IFaceNDArray;
+      const numBins = edges.data.length - 1;
+      const hist = new Float64Array(numBins);
+      for (let i = 0; i < data.length; i++) {
+        if (Number.isNaN(data[i])) continue;
+        const val = data[i];
+        let binIdx = -1;
+        for (let b = 0; b < numBins; b++) {
+          if (b === numBins - 1) {
+            if (val >= edges.data[b] && val <= edges.data[b + 1]) {
+              binIdx = b;
+              break;
+            }
+          } else {
+            if (val >= edges.data[b] && val < edges.data[b + 1]) {
+              binIdx = b;
+              break;
+            }
+          }
+        }
+        if (binIdx >= 0) {
+          const w = weights ? weights.data[i] : 1;
+          hist[binIdx] += w;
+        }
+      }
+
+      if (density) {
+        let totalWeight = 0;
+        for (let i = 0; i < numBins; i++) totalWeight += hist[i];
+        if (totalWeight > 0) {
+          for (let i = 0; i < numBins; i++) {
+            const binWidth = edges.data[i + 1] - edges.data[i];
+            hist[i] = hist[i] / (totalWeight * (binWidth || 1));
+          }
+        }
+      }
+
+      return {
+        hist: this.array(Array.from(hist), [numBins]),
+        binEdges: this.array(Array.from(edges.data), [...edges.shape]),
+      };
+    }
+
+    let numBins: number;
+    if (typeof bins === 'string') {
+      numBins = this._computeOptimalBins(data, bins);
+    } else {
+      numBins = bins;
+    }
+
     let min: number, max: number;
 
     if (range != null) {
@@ -15350,22 +15513,22 @@ ${productCode}
 
     if (min === Infinity) {
       return {
-        hist: this.array(Array(bins).fill(0), [bins]),
-        binEdges: this.array(Array(bins + 1).fill(0), [bins + 1]),
+        hist: this.array(Array(numBins).fill(0), [numBins]),
+        binEdges: this.array(Array(numBins + 1).fill(0), [numBins + 1]),
       };
     }
 
     const rangeSpan = max - min;
-    const binWidth = rangeSpan / bins || 1;
-    const edges = new Float64Array(bins + 1);
-    for (let i = 0; i <= bins; i++) edges[i] = min + i * binWidth;
+    const binWidth = rangeSpan / numBins || 1;
+    const edges = new Float64Array(numBins + 1);
+    for (let i = 0; i <= numBins; i++) edges[i] = min + i * binWidth;
 
-    const hist = new Float64Array(bins);
+    const hist = new Float64Array(numBins);
     for (let i = 0; i < data.length; i++) {
       if (Number.isNaN(data[i])) continue;
       if (range != null && (data[i] < min || data[i] > max)) continue;
       let binIdx = Math.floor((data[i] - min) / binWidth);
-      if (binIdx >= bins) binIdx = bins - 1;
+      if (binIdx >= numBins) binIdx = numBins - 1;
       if (binIdx < 0) binIdx = 0;
       const w = weights ? weights.data[i] : 1;
       hist[binIdx] += w;
@@ -15373,21 +15536,21 @@ ${productCode}
 
     if (density) {
       let totalWeight = 0;
-      for (let i = 0; i < bins; i++) totalWeight += hist[i];
+      for (let i = 0; i < numBins; i++) totalWeight += hist[i];
       if (totalWeight > 0) {
-        for (let i = 0; i < bins; i++) {
+        for (let i = 0; i < numBins; i++) {
           hist[i] = hist[i] / (totalWeight * binWidth);
         }
       }
     }
 
     return {
-      hist: this.array(Array.from(hist), [bins]),
-      binEdges: this.array(Array.from(edges), [bins + 1]),
+      hist: this.array(Array.from(hist), [numBins]),
+      binEdges: this.array(Array.from(edges), [numBins + 1]),
     };
   }
 
-  histogramBinEdges(arr: IFaceNDArray, bins: number = 10): IFaceNDArray {
+  histogramBinEdges(arr: IFaceNDArray, bins: BinsParam = 10): IFaceNDArray {
     const { binEdges } = this.histogram(arr, bins);
     return binEdges;
   }
@@ -15665,8 +15828,9 @@ ${productCode}
 
   // ============ Array Manipulation (Additional) ============
 
-  copy(arr: IFaceNDArray): IFaceNDArray {
-    return this.createArray(new Float64Array(arr.data), [...arr.shape]);
+  copy(arr: IFaceNDArray, dtype?: DType): IFaceNDArray {
+    const dt = dtype ?? arr.dtype ?? 'float64';
+    return this.createArray(createTypedArrayFrom(dt, Array.from(arr.data)), [...arr.shape], dt);
   }
 
   empty(shape: number[], dtype: DType = DEFAULT_DTYPE): IFaceNDArray {
@@ -16900,6 +17064,146 @@ ${productCode}
     return this.rand(shape);
   }
 
+  f(dfnum: number, dfden: number, shape: number[]): IFaceNDArray {
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      const x1 = this._gammaVariate(dfnum / 2) * 2;
+      const x2 = this._gammaVariate(dfden / 2) * 2;
+      data[i] = x1 / dfnum / (x2 / dfden);
+    }
+    return this.createArray(data, shape);
+  }
+
+  hypergeometric(ngood: number, nbad: number, nsample: number, shape: number[]): IFaceNDArray {
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      let good = ngood,
+        bad = nbad,
+        drawn = 0;
+      for (let j = 0; j < nsample; j++) {
+        const total = good + bad;
+        if (this._xorshift() < good / total) {
+          drawn++;
+          good--;
+        } else {
+          bad--;
+        }
+      }
+      data[i] = drawn;
+    }
+    return this.createArray(data, shape);
+  }
+
+  negativeBinomial(n: number, p: number, shape: number[]): IFaceNDArray {
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      const y = (this._gammaVariate(n) * (1 - p)) / p;
+      const L = Math.exp(-y);
+      let k = 0,
+        prob = 1;
+      do {
+        k++;
+        prob *= this._xorshift();
+      } while (prob > L && y > 0);
+      data[i] = y > 0 ? k - 1 : 0;
+    }
+    return this.createArray(data, shape);
+  }
+
+  pareto(a: number, shape: number[]): IFaceNDArray {
+    const size = shape.reduce((acc, x) => acc * x, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      data[i] = Math.pow(1 - this._xorshift() || 1e-10, -1 / a) - 1;
+    }
+    return this.createArray(data, shape);
+  }
+
+  rayleigh(scale: number, shape: number[]): IFaceNDArray {
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      data[i] = scale * Math.sqrt(-2 * Math.log(this._xorshift() || 1e-10));
+    }
+    return this.createArray(data, shape);
+  }
+
+  triangular(left: number, mode: number, right: number, shape: number[]): IFaceNDArray {
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    const fc = (mode - left) / (right - left);
+    for (let i = 0; i < size; i++) {
+      const u = this._xorshift();
+      if (u < fc) {
+        data[i] = left + Math.sqrt(u * (right - left) * (mode - left));
+      } else {
+        data[i] = right - Math.sqrt((1 - u) * (right - left) * (right - mode));
+      }
+    }
+    return this.createArray(data, shape);
+  }
+
+  vonmises(mu: number, kappa: number, shape: number[]): IFaceNDArray {
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    const tau = 1 + Math.sqrt(1 + 4 * kappa * kappa);
+    const rho = (tau - Math.sqrt(2 * tau)) / (2 * kappa);
+    const r = (1 + rho * rho) / (2 * rho);
+    for (let i = 0; i < size; i++) {
+      let f: number;
+      while (true) {
+        const u1 = this._xorshift();
+        const z = Math.cos(Math.PI * u1);
+        f = (1 + r * z) / (r + z);
+        const c = kappa * (r - f);
+        const u2 = this._xorshift();
+        if (c * (2 - c) > u2 || Math.log(c / u2) + 1 >= c) break;
+      }
+      const u3 = this._xorshift();
+      data[i] = mu + (u3 > 0.5 ? 1 : -1) * Math.acos(f);
+    }
+    return this.createArray(data, shape);
+  }
+
+  wald(mean: number, scale: number, shape: number[]): IFaceNDArray {
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      const v = this._boxMullerNormal();
+      const y = v * v;
+      const x =
+        mean +
+        (mean * mean * y) / (2 * scale) -
+        (mean / (2 * scale)) * Math.sqrt(4 * mean * scale * y + mean * mean * y * y);
+      const u = this._xorshift();
+      data[i] = u <= mean / (mean + x) ? x : (mean * mean) / x;
+    }
+    return this.createArray(data, shape);
+  }
+
+  zipf(a: number, shape: number[]): IFaceNDArray {
+    const size = shape.reduce((acc, x) => acc * x, 1);
+    const data = new Float64Array(size);
+    const am1 = a - 1;
+    const b = Math.pow(2, am1);
+    for (let i = 0; i < size; i++) {
+      let x: number;
+      while (true) {
+        const u = 1 - this._xorshift();
+        const v = this._xorshift();
+        x = Math.floor(Math.pow(u, -1 / am1));
+        if (x < 1) continue;
+        const t = Math.pow(1 + 1 / x, am1);
+        if ((v * x * (t - 1)) / (b - 1) <= t / b) break;
+      }
+      data[i] = x;
+    }
+    return this.createArray(data, shape);
+  }
+
   // ============ Additional Stats ============
 
   average(
@@ -17048,18 +17352,27 @@ ${productCode}
   histogram2d(
     x: IFaceNDArray,
     y: IFaceNDArray,
-    bins: number = 10
+    bins: number = 10,
+    range?: [[number, number], [number, number]] | null,
+    density?: boolean,
+    weights?: IFaceNDArray
   ): { hist: IFaceNDArray; xEdges: IFaceNDArray; yEdges: IFaceNDArray } {
     const n = x.data.length;
-    let xMin = Infinity,
-      xMax = -Infinity,
-      yMin = Infinity,
+    let xMin: number, xMax: number, yMin: number, yMax: number;
+
+    if (range != null) {
+      [[xMin, xMax], [yMin, yMax]] = range;
+    } else {
+      xMin = Infinity;
+      xMax = -Infinity;
+      yMin = Infinity;
       yMax = -Infinity;
-    for (let i = 0; i < n; i++) {
-      if (x.data[i] < xMin) xMin = x.data[i];
-      if (x.data[i] > xMax) xMax = x.data[i];
-      if (y.data[i] < yMin) yMin = y.data[i];
-      if (y.data[i] > yMax) yMax = y.data[i];
+      for (let i = 0; i < n; i++) {
+        if (x.data[i] < xMin) xMin = x.data[i];
+        if (x.data[i] > xMax) xMax = x.data[i];
+        if (y.data[i] < yMin) yMin = y.data[i];
+        if (y.data[i] > yMax) yMax = y.data[i];
+      }
     }
 
     const xRange = xMax - xMin || 1;
@@ -17076,13 +17389,29 @@ ${productCode}
 
     const hist = new Float64Array(bins * bins);
     for (let i = 0; i < n; i++) {
-      let xi = Math.floor((x.data[i] - xMin) / xBinWidth);
-      let yi = Math.floor((y.data[i] - yMin) / yBinWidth);
+      const xv = x.data[i];
+      const yv = y.data[i];
+      if (Number.isNaN(xv) || Number.isNaN(yv)) continue;
+      if (range != null && (xv < xMin || xv > xMax || yv < yMin || yv > yMax)) continue;
+      let xi = Math.floor((xv - xMin) / xBinWidth);
+      let yi = Math.floor((yv - yMin) / yBinWidth);
       if (xi >= bins) xi = bins - 1;
       if (yi >= bins) yi = bins - 1;
       if (xi < 0) xi = 0;
       if (yi < 0) yi = 0;
-      hist[xi * bins + yi]++;
+      const w = weights ? weights.data[i] : 1;
+      hist[xi * bins + yi] += w;
+    }
+
+    if (density) {
+      let totalWeight = 0;
+      for (let i = 0; i < bins * bins; i++) totalWeight += hist[i];
+      if (totalWeight > 0) {
+        const area = xBinWidth * yBinWidth;
+        for (let i = 0; i < bins * bins; i++) {
+          hist[i] = hist[i] / (totalWeight * area);
+        }
+      }
     }
 
     return {
@@ -17297,6 +17626,31 @@ ${productCode}
       }
     }
     return this.vstack(rows);
+  }
+
+  fillDiagonal(arr: IFaceNDArray, val: number, wrap: boolean = false): IFaceNDArray {
+    if (arr.shape.length < 2) {
+      throw new Error('fillDiagonal requires at least a 2-d array');
+    }
+    const data = new Float64Array(arr.data);
+    const rows = arr.shape[0];
+    const cols = arr.shape[1];
+    const step = cols + 1;
+    if (wrap) {
+      for (let i = 0; i < rows; i++) {
+        const col = i % cols;
+        const flatIdx = i * cols + col;
+        if (flatIdx < data.length) {
+          data[flatIdx] = val;
+        }
+      }
+    } else {
+      const diagLen = Math.min(rows, cols);
+      for (let i = 0; i < diagLen; i++) {
+        data[i * step] = val;
+      }
+    }
+    return this.createArray(data, [...arr.shape]);
   }
 
   // ============ Index Arrays ============

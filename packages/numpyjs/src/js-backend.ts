@@ -13,6 +13,8 @@ import {
   DType,
   AnyTypedArray,
   ArrayOrScalar,
+  BinsParam,
+  SortKind,
   DEFAULT_DTYPE,
   createTypedArray,
   createTypedArrayFrom,
@@ -2974,25 +2976,25 @@ export class JsBackend implements Backend {
 
   // ============ Creation - Like Functions ============
 
-  zerosLike(arr: NDArray): NDArray {
-    const dtype = arr.dtype || 'float64';
-    return this.zeros(arr.shape, dtype);
+  zerosLike(arr: NDArray, dtype?: DType): NDArray {
+    const dt = dtype ?? arr.dtype ?? 'float64';
+    return this.zeros(arr.shape, dt);
   }
 
-  onesLike(arr: NDArray): NDArray {
-    const dtype = arr.dtype || 'float64';
-    return this.ones(arr.shape, dtype);
+  onesLike(arr: NDArray, dtype?: DType): NDArray {
+    const dt = dtype ?? arr.dtype ?? 'float64';
+    return this.ones(arr.shape, dt);
   }
 
-  emptyLike(arr: NDArray): NDArray {
+  emptyLike(arr: NDArray, dtype?: DType): NDArray {
     // In JS, we can't have uninitialized memory, so same as zeros
-    const dtype = arr.dtype || 'float64';
-    return this.zeros(arr.shape, dtype);
+    const dt = dtype ?? arr.dtype ?? 'float64';
+    return this.zeros(arr.shape, dt);
   }
 
-  fullLike(arr: NDArray, value: number): NDArray {
-    const dtype = arr.dtype || 'float64';
-    return this.full(arr.shape, value, dtype);
+  fullLike(arr: NDArray, value: number, dtype?: DType): NDArray {
+    const dt = dtype ?? arr.dtype ?? 'float64';
+    return this.full(arr.shape, value, dt);
   }
 
   // ============ Broadcasting ============
@@ -3225,6 +3227,20 @@ export class JsBackend implements Backend {
     }
 
     return new JsNDArray(arr.data.slice(), newShape);
+  }
+
+  resize(arr: NDArray, newShape: number[]): NDArray {
+    const newSize = newShape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(newSize);
+    const srcLen = arr.data.length;
+    if (srcLen === 0) {
+      // If source is empty, fill with zeros (already done by Float64Array)
+      return new JsNDArray(data, [...newShape]);
+    }
+    for (let i = 0; i < newSize; i++) {
+      data[i] = arr.data[i % srcLen];
+    }
+    return new JsNDArray(data, [...newShape]);
   }
 
   flatten(arr: NDArray): NDArray {
@@ -3778,7 +3794,7 @@ export class JsBackend implements Backend {
     return new JsNDArray(result, newShape);
   }
 
-  gradient(arr: NDArray, axis: number = -1): NDArray {
+  gradient(arr: NDArray, axis: number = -1, edgeOrder: 1 | 2 = 1): NDArray {
     const ndim = arr.shape.length;
     axis = this._normalizeAxis(axis, ndim);
     const shape = arr.shape;
@@ -3787,11 +3803,20 @@ export class JsBackend implements Backend {
     if (axisLen < 2) {
       throw new Error('gradient requires at least 2 elements along axis');
     }
+    if (edgeOrder === 2 && axisLen < 3) {
+      throw new Error('gradient with edge_order=2 requires at least 3 elements along axis');
+    }
 
     const result = new Float64Array(arr.data.length);
     const strides = this._computeStrides(shape);
 
-    // For each position, compute central difference (or forward/backward at edges)
+    // Helper to get flat index from coords
+    const flatIdx = (coords: number[]) => {
+      let idx = 0;
+      for (let d = 0; d < ndim; d++) idx += coords[d] * strides[d];
+      return idx;
+    };
+
     for (let i = 0; i < arr.data.length; i++) {
       const coords = new Array(ndim);
       let remaining = i;
@@ -3804,32 +3829,40 @@ export class JsBackend implements Backend {
       let grad: number;
 
       if (axisCoord === 0) {
-        // Forward difference
-        const nextCoords = [...coords];
-        nextCoords[axis] = 1;
-        let nextIdx = 0;
-        for (let d = 0; d < ndim; d++) nextIdx += nextCoords[d] * strides[d];
-        grad = arr.data[nextIdx] - arr.data[i];
+        if (edgeOrder === 2) {
+          // Second-order accurate forward: (-3f0 + 4f1 - f2) / 2
+          const c1 = [...coords];
+          c1[axis] = 1;
+          const c2 = [...coords];
+          c2[axis] = 2;
+          grad = (-3 * arr.data[i] + 4 * arr.data[flatIdx(c1)] - arr.data[flatIdx(c2)]) / 2;
+        } else {
+          // First-order forward difference
+          const nextCoords = [...coords];
+          nextCoords[axis] = 1;
+          grad = arr.data[flatIdx(nextCoords)] - arr.data[i];
+        }
       } else if (axisCoord === axisLen - 1) {
-        // Backward difference
-        const prevCoords = [...coords];
-        prevCoords[axis] = axisLen - 2;
-        let prevIdx = 0;
-        for (let d = 0; d < ndim; d++) prevIdx += prevCoords[d] * strides[d];
-        grad = arr.data[i] - arr.data[prevIdx];
+        if (edgeOrder === 2) {
+          // Second-order accurate backward: (3fN - 4fN-1 + fN-2) / 2
+          const c1 = [...coords];
+          c1[axis] = axisLen - 2;
+          const c2 = [...coords];
+          c2[axis] = axisLen - 3;
+          grad = (3 * arr.data[i] - 4 * arr.data[flatIdx(c1)] + arr.data[flatIdx(c2)]) / 2;
+        } else {
+          // First-order backward difference
+          const prevCoords = [...coords];
+          prevCoords[axis] = axisLen - 2;
+          grad = arr.data[i] - arr.data[flatIdx(prevCoords)];
+        }
       } else {
-        // Central difference
+        // Central difference (same for both edge orders)
         const prevCoords = [...coords];
         const nextCoords = [...coords];
         prevCoords[axis] = axisCoord - 1;
         nextCoords[axis] = axisCoord + 1;
-        let prevIdx = 0,
-          nextIdx = 0;
-        for (let d = 0; d < ndim; d++) {
-          prevIdx += prevCoords[d] * strides[d];
-          nextIdx += nextCoords[d] * strides[d];
-        }
-        grad = (arr.data[nextIdx] - arr.data[prevIdx]) / 2;
+        grad = (arr.data[flatIdx(nextCoords)] - arr.data[flatIdx(prevCoords)]) / 2;
       }
 
       result[i] = grad;
@@ -4186,6 +4219,10 @@ export class JsBackend implements Backend {
     return this.concatenate(processed, 0);
   }
 
+  rowStack(arrays: NDArray[]): NDArray {
+    return this.vstack(arrays);
+  }
+
   hstack(arrays: NDArray[]): NDArray {
     // Stack arrays horizontally (column-wise)
     if (arrays[0].shape.length === 1) {
@@ -4389,7 +4426,7 @@ export class JsBackend implements Backend {
 
   // ============ Sorting ============
 
-  sort(arr: NDArray, axis: number = -1): NDArray {
+  sort(arr: NDArray, axis: number = -1, _kind?: SortKind): NDArray {
     const ndim = arr.shape.length;
     axis = this._normalizeAxis(axis, ndim);
 
@@ -4458,7 +4495,7 @@ export class JsBackend implements Backend {
     return new JsNDArray(result, shape);
   }
 
-  argsort(arr: NDArray, axis: number = -1): NDArray {
+  argsort(arr: NDArray, axis: number = -1, _kind?: SortKind): NDArray {
     const ndim = arr.shape.length;
     axis = this._normalizeAxis(axis, ndim);
 
@@ -4530,10 +4567,21 @@ export class JsBackend implements Backend {
   searchsorted(
     arr: NDArray,
     v: number | NDArray,
-    side: 'left' | 'right' = 'left'
+    side: 'left' | 'right' = 'left',
+    sorter?: NDArray
   ): NDArray | number {
     const flat = this.flatten(arr);
-    const data = flat.data;
+    // If sorter is provided, reindex the array through the sorter permutation
+    let data: AnyTypedArray;
+    if (sorter) {
+      const sortedData = new Float64Array(flat.data.length);
+      for (let i = 0; i < flat.data.length; i++) {
+        sortedData[i] = flat.data[sorter.data[i]];
+      }
+      data = sortedData;
+    } else {
+      data = flat.data;
+    }
 
     const search = (val: number): number => {
       let lo = 0,
@@ -5029,14 +5077,136 @@ export class JsBackend implements Backend {
 
   // ============ Histogram ============
 
+  private _computeOptimalBins(data: AnyTypedArray, strategy: string): number {
+    // Filter out NaN values
+    const valid: number[] = [];
+    for (let i = 0; i < data.length; i++) {
+      if (!Number.isNaN(data[i])) valid.push(data[i]);
+    }
+    const n = valid.length;
+    if (n === 0) return 10;
+
+    valid.sort((a, b) => a - b);
+    const min = valid[0];
+    const max = valid[n - 1];
+    const range = max - min || 1;
+
+    // Helper: IQR
+    const q1Idx = Math.floor(n * 0.25);
+    const q3Idx = Math.floor(n * 0.75);
+    const iqr = valid[q3Idx] - valid[q1Idx];
+
+    // Helper: std
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += valid[i];
+    const mean = sum / n;
+    let variance = 0;
+    for (let i = 0; i < n; i++) variance += (valid[i] - mean) ** 2;
+    const std = Math.sqrt(variance / n);
+
+    switch (strategy) {
+      case 'sqrt':
+        return Math.max(1, Math.ceil(Math.sqrt(n)));
+      case 'sturges':
+        return Math.max(1, Math.ceil(Math.log2(n) + 1));
+      case 'rice':
+        return Math.max(1, Math.ceil(2 * Math.cbrt(n)));
+      case 'scott': {
+        const h = 3.5 * std * Math.pow(n, -1 / 3);
+        return Math.max(1, Math.ceil(range / (h || 1)));
+      }
+      case 'fd': {
+        const h = 2 * iqr * Math.pow(n, -1 / 3);
+        return Math.max(1, Math.ceil(range / (h || 1)));
+      }
+      case 'doane': {
+        if (n < 3) return 1;
+        // Skewness
+        let g1 = 0;
+        for (let i = 0; i < n; i++) g1 += ((valid[i] - mean) / (std || 1)) ** 3;
+        g1 /= n;
+        const sigmaG1 = Math.sqrt((6 * (n - 2)) / ((n + 1) * (n + 3)));
+        return Math.max(
+          1,
+          Math.ceil(1 + Math.log2(n) + Math.log2(1 + Math.abs(g1) / (sigmaG1 || 1)))
+        );
+      }
+      case 'auto': {
+        // auto uses max of sturges and fd
+        const sturges = Math.max(1, Math.ceil(Math.log2(n) + 1));
+        const hFd = 2 * iqr * Math.pow(n, -1 / 3);
+        const fd = hFd > 0 ? Math.max(1, Math.ceil(range / hFd)) : sturges;
+        return Math.max(sturges, fd);
+      }
+      default:
+        return 10;
+    }
+  }
+
   histogram(
     arr: NDArray,
-    bins: number = 10,
+    bins: BinsParam = 10,
     range?: [number, number] | null,
     density?: boolean,
     weights?: NDArray
   ): { hist: NDArray; binEdges: NDArray } {
     const data = arr.data;
+
+    // If bins is an NDArray, use those as bin edges directly
+    if (typeof bins === 'object' && bins !== null && 'data' in bins) {
+      const edges = bins as NDArray;
+      const numBins = edges.data.length - 1;
+      const hist = new Float64Array(numBins);
+      for (let i = 0; i < data.length; i++) {
+        if (Number.isNaN(data[i])) continue;
+        const val = data[i];
+        // Find which bin this value falls into
+        let binIdx = -1;
+        for (let b = 0; b < numBins; b++) {
+          if (b === numBins - 1) {
+            // Last bin is inclusive on the right
+            if (val >= edges.data[b] && val <= edges.data[b + 1]) {
+              binIdx = b;
+              break;
+            }
+          } else {
+            if (val >= edges.data[b] && val < edges.data[b + 1]) {
+              binIdx = b;
+              break;
+            }
+          }
+        }
+        if (binIdx >= 0) {
+          const w = weights ? weights.data[i] : 1;
+          hist[binIdx] += w;
+        }
+      }
+
+      if (density) {
+        let totalWeight = 0;
+        for (let i = 0; i < numBins; i++) totalWeight += hist[i];
+        if (totalWeight > 0) {
+          for (let i = 0; i < numBins; i++) {
+            const binWidth = edges.data[i + 1] - edges.data[i];
+            hist[i] = hist[i] / (totalWeight * (binWidth || 1));
+          }
+        }
+      }
+
+      return {
+        hist: new JsNDArray(hist, [numBins]),
+        binEdges: new JsNDArray(new Float64Array(edges.data), [...edges.shape]),
+      };
+    }
+
+    // If bins is a string, compute optimal bin count
+    let numBins: number;
+    if (typeof bins === 'string') {
+      numBins = this._computeOptimalBins(data, bins);
+    } else {
+      numBins = bins;
+    }
+
     let min: number, max: number;
 
     if (range != null) {
@@ -5056,24 +5226,24 @@ export class JsBackend implements Backend {
       if (min === Infinity) {
         // All NaN
         return {
-          hist: new JsNDArray(new Float64Array(bins), [bins]),
-          binEdges: new JsNDArray(new Float64Array(bins + 1), [bins + 1]),
+          hist: new JsNDArray(new Float64Array(numBins), [numBins]),
+          binEdges: new JsNDArray(new Float64Array(numBins + 1), [numBins + 1]),
         };
       }
     }
 
     const rangeSpan = max - min;
-    const binWidth = rangeSpan / bins || 1;
-    const edges = new Float64Array(bins + 1);
-    for (let i = 0; i <= bins; i++) edges[i] = min + i * binWidth;
+    const binWidth = rangeSpan / numBins || 1;
+    const edges = new Float64Array(numBins + 1);
+    for (let i = 0; i <= numBins; i++) edges[i] = min + i * binWidth;
 
-    const hist = new Float64Array(bins);
+    const hist = new Float64Array(numBins);
     for (let i = 0; i < data.length; i++) {
       if (Number.isNaN(data[i])) continue;
       // Skip values outside range when range is specified
       if (range != null && (data[i] < min || data[i] > max)) continue;
       let binIdx = Math.floor((data[i] - min) / binWidth);
-      if (binIdx >= bins) binIdx = bins - 1;
+      if (binIdx >= numBins) binIdx = numBins - 1;
       if (binIdx < 0) binIdx = 0;
       const w = weights ? weights.data[i] : 1;
       hist[binIdx] += w;
@@ -5082,21 +5252,21 @@ export class JsBackend implements Backend {
     // Apply density normalization: normalize so integral over bins equals 1
     if (density) {
       let totalWeight = 0;
-      for (let i = 0; i < bins; i++) totalWeight += hist[i];
+      for (let i = 0; i < numBins; i++) totalWeight += hist[i];
       if (totalWeight > 0) {
-        for (let i = 0; i < bins; i++) {
+        for (let i = 0; i < numBins; i++) {
           hist[i] = hist[i] / (totalWeight * binWidth);
         }
       }
     }
 
     return {
-      hist: new JsNDArray(hist, [bins]),
-      binEdges: new JsNDArray(edges, [bins + 1]),
+      hist: new JsNDArray(hist, [numBins]),
+      binEdges: new JsNDArray(edges, [numBins + 1]),
     };
   }
 
-  histogramBinEdges(arr: NDArray, bins: number = 10): NDArray {
+  histogramBinEdges(arr: NDArray, bins: BinsParam = 10): NDArray {
     const { binEdges } = this.histogram(arr, bins);
     return binEdges;
   }
@@ -5374,8 +5544,9 @@ export class JsBackend implements Backend {
 
   // ============ Array Manipulation (Additional) ============
 
-  copy(arr: NDArray): NDArray {
-    return new JsNDArray(new Float64Array(arr.data), [...arr.shape]);
+  copy(arr: NDArray, dtype?: DType): NDArray {
+    const dt = dtype ?? arr.dtype ?? 'float64';
+    return new JsNDArray(createTypedArrayFrom(dt, Array.from(arr.data)), [...arr.shape], dt);
   }
 
   empty(shape: number[], dtype: DType = 'float64'): NDArray {
@@ -6586,6 +6757,153 @@ export class JsBackend implements Backend {
     return this.rand(shape);
   }
 
+  f(dfnum: number, dfden: number, shape: number[]): NDArray {
+    // F = (X1/d1) / (X2/d2) where X1 ~ chi-square(d1), X2 ~ chi-square(d2)
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      const x1 = this._gammaRandom(dfnum / 2) * 2;
+      const x2 = this._gammaRandom(dfden / 2) * 2;
+      data[i] = x1 / dfnum / (x2 / dfden);
+    }
+    return new JsNDArray(data, shape);
+  }
+
+  hypergeometric(ngood: number, nbad: number, nsample: number, shape: number[]): NDArray {
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      // Draw nsample from population of ngood + nbad without replacement
+      let good = ngood,
+        bad = nbad,
+        drawn = 0;
+      for (let j = 0; j < nsample; j++) {
+        const total = good + bad;
+        if (this._xorshift() < good / total) {
+          drawn++;
+          good--;
+        } else {
+          bad--;
+        }
+      }
+      data[i] = drawn;
+    }
+    return new JsNDArray(data, shape);
+  }
+
+  negativeBinomial(n: number, p: number, shape: number[]): NDArray {
+    // NB via Poisson-Gamma mixture: X ~ Poisson(Y) where Y ~ Gamma(n, (1-p)/p)
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      const y = (this._gammaRandom(n) * (1 - p)) / p;
+      // Poisson(y)
+      const L = Math.exp(-y);
+      let k = 0,
+        prob = 1;
+      do {
+        k++;
+        prob *= this._xorshift();
+      } while (prob > L && y > 0);
+      data[i] = y > 0 ? k - 1 : 0;
+    }
+    return new JsNDArray(data, shape);
+  }
+
+  pareto(a: number, shape: number[]): NDArray {
+    const size = shape.reduce((acc, x) => acc * x, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      data[i] = Math.pow(1 - this._xorshift() || 1e-10, -1 / a) - 1;
+    }
+    return new JsNDArray(data, shape);
+  }
+
+  rayleigh(scale: number, shape: number[]): NDArray {
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      data[i] = scale * Math.sqrt(-2 * Math.log(this._xorshift() || 1e-10));
+    }
+    return new JsNDArray(data, shape);
+  }
+
+  triangular(left: number, mode: number, right: number, shape: number[]): NDArray {
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    const fc = (mode - left) / (right - left);
+    for (let i = 0; i < size; i++) {
+      const u = this._xorshift();
+      if (u < fc) {
+        data[i] = left + Math.sqrt(u * (right - left) * (mode - left));
+      } else {
+        data[i] = right - Math.sqrt((1 - u) * (right - left) * (right - mode));
+      }
+    }
+    return new JsNDArray(data, shape);
+  }
+
+  vonmises(mu: number, kappa: number, shape: number[]): NDArray {
+    // Best-Fisher algorithm for von Mises distribution
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    const tau = 1 + Math.sqrt(1 + 4 * kappa * kappa);
+    const rho = (tau - Math.sqrt(2 * tau)) / (2 * kappa);
+    const r = (1 + rho * rho) / (2 * rho);
+    for (let i = 0; i < size; i++) {
+      let f: number;
+      while (true) {
+        const u1 = this._xorshift();
+        const z = Math.cos(Math.PI * u1);
+        f = (1 + r * z) / (r + z);
+        const c = kappa * (r - f);
+        const u2 = this._xorshift();
+        if (c * (2 - c) > u2 || Math.log(c / u2) + 1 >= c) break;
+      }
+      const u3 = this._xorshift();
+      data[i] = mu + (u3 > 0.5 ? 1 : -1) * Math.acos(f);
+    }
+    return new JsNDArray(data, shape);
+  }
+
+  wald(mean: number, scale: number, shape: number[]): NDArray {
+    // Inverse Gaussian distribution (Michael/Schucany/Haas algorithm)
+    const size = shape.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(size);
+    for (let i = 0; i < size; i++) {
+      const v = this._boxMullerSingle();
+      const y = v * v;
+      const x =
+        mean +
+        (mean * mean * y) / (2 * scale) -
+        (mean / (2 * scale)) * Math.sqrt(4 * mean * scale * y + mean * mean * y * y);
+      const u = this._xorshift();
+      data[i] = u <= mean / (mean + x) ? x : (mean * mean) / x;
+    }
+    return new JsNDArray(data, shape);
+  }
+
+  zipf(a: number, shape: number[]): NDArray {
+    // Rejection method for Zipf distribution
+    const size = shape.reduce((acc, x) => acc * x, 1);
+    const data = new Float64Array(size);
+    const am1 = a - 1;
+    const b = Math.pow(2, am1);
+    for (let i = 0; i < size; i++) {
+      let x: number;
+      while (true) {
+        const u = 1 - this._xorshift();
+        const v = this._xorshift();
+        x = Math.floor(Math.pow(u, -1 / am1));
+        if (x < 1) continue;
+        const t = Math.pow(1 + 1 / x, am1);
+        if ((v * x * (t - 1)) / (b - 1) <= t / b) break;
+      }
+      data[i] = x;
+    }
+    return new JsNDArray(data, shape);
+  }
+
   // ============ Additional Stats ============
 
   average(arr: NDArray, weights?: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
@@ -6741,32 +7059,60 @@ export class JsBackend implements Backend {
   histogram2d(
     x: NDArray,
     y: NDArray,
-    bins: number = 10
+    bins: number = 10,
+    range?: [[number, number], [number, number]] | null,
+    density?: boolean,
+    weights?: NDArray
   ): { hist: NDArray; xEdges: NDArray; yEdges: NDArray } {
     const n = x.data.length;
-    const xMin = this.min(x) as number,
+    let xMin: number, xMax: number, yMin: number, yMax: number;
+
+    if (range != null) {
+      [[xMin, xMax], [yMin, yMax]] = range;
+    } else {
+      xMin = this.min(x) as number;
       xMax = this.max(x) as number;
-    const yMin = this.min(y) as number,
+      yMin = this.min(y) as number;
       yMax = this.max(y) as number;
+    }
 
     const xEdges = new Float64Array(bins + 1);
     const yEdges = new Float64Array(bins + 1);
+    const xRange = xMax - xMin || 1;
+    const yRange = yMax - yMin || 1;
+    const xBinWidth = xRange / bins;
+    const yBinWidth = yRange / bins;
     for (let i = 0; i <= bins; i++) {
-      xEdges[i] = xMin + ((xMax - xMin) * i) / bins;
-      yEdges[i] = yMin + ((yMax - yMin) * i) / bins;
+      xEdges[i] = xMin + i * xBinWidth;
+      yEdges[i] = yMin + i * yBinWidth;
     }
 
     const hist = new Float64Array(bins * bins);
-    const xRange = xMax - xMin || 1;
-    const yRange = yMax - yMin || 1;
     for (let i = 0; i < n; i++) {
-      let xi = Math.floor(((x.data[i] - xMin) / xRange) * bins);
-      let yi = Math.floor(((y.data[i] - yMin) / yRange) * bins);
+      const xv = x.data[i];
+      const yv = y.data[i];
+      if (Number.isNaN(xv) || Number.isNaN(yv)) continue;
+      // Skip values outside range when range is specified
+      if (range != null && (xv < xMin || xv > xMax || yv < yMin || yv > yMax)) continue;
+      let xi = Math.floor((xv - xMin) / xBinWidth);
+      let yi = Math.floor((yv - yMin) / yBinWidth);
       xi = Math.min(xi, bins - 1);
       yi = Math.min(yi, bins - 1);
       xi = Math.max(xi, 0);
       yi = Math.max(yi, 0);
-      hist[xi * bins + yi]++;
+      const w = weights ? weights.data[i] : 1;
+      hist[xi * bins + yi] += w;
+    }
+
+    if (density) {
+      let totalWeight = 0;
+      for (let i = 0; i < bins * bins; i++) totalWeight += hist[i];
+      if (totalWeight > 0) {
+        const area = xBinWidth * yBinWidth;
+        for (let i = 0; i < bins * bins; i++) {
+          hist[i] = hist[i] / (totalWeight * area);
+        }
+      }
     }
 
     return {
@@ -6991,6 +7337,32 @@ export class JsBackend implements Backend {
       }
     }
     return this.vstack(rows);
+  }
+
+  fillDiagonal(arr: NDArray, val: number, wrap: boolean = false): NDArray {
+    if (arr.shape.length < 2) {
+      throw new Error('fillDiagonal requires at least a 2-d array');
+    }
+    const data = new Float64Array(arr.data);
+    const rows = arr.shape[0];
+    const cols = arr.shape[1];
+    const step = cols + 1; // stride along diagonal in row-major
+    if (wrap) {
+      // Fill diagonal wrapping around for tall matrices
+      for (let i = 0; i < rows; i++) {
+        const col = i % cols;
+        const flatIdx = i * cols + col;
+        if (flatIdx < data.length) {
+          data[flatIdx] = val;
+        }
+      }
+    } else {
+      const diagLen = Math.min(rows, cols);
+      for (let i = 0; i < diagLen; i++) {
+        data[i * step] = val;
+      }
+    }
+    return new JsNDArray(data, [...arr.shape]);
   }
 
   // ============ Index Arrays ============
