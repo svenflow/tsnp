@@ -4,13 +4,7 @@
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { Backend, DEFAULT_TOL, RELAXED_TOL, approxEq } from './test-utils';
-
-// Helper to get data from arrays (handles GPU materialization)
-async function getData(arr: { toArray(): number[] }, B: Backend): Promise<number[]> {
-  if (B.materializeAll) await B.materializeAll();
-  return arr.toArray();
-}
+import { Backend, RELAXED_TOL, approxEq, getData } from './test-utils';
 
 export function statsTests(getBackend: () => Backend) {
   describe('stats', () => {
@@ -20,8 +14,7 @@ export function statsTests(getBackend: () => Backend) {
     });
 
     const arr = (data: number[]) => B.array(data, [data.length]);
-    const mat = (data: number[], rows: number, cols: number) =>
-      B.array(data, [rows, cols]);
+    const mat = (data: number[], rows: number, cols: number) => B.array(data, [rows, cols]);
 
     // ============ sum ============
 
@@ -96,12 +89,12 @@ export function statsTests(getBackend: () => Backend) {
       it('computes variance', () => {
         const a = arr([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]);
         // Population variance = 4.0
-        expect(approxEq(B.var(a, 0), 4.0, RELAXED_TOL)).toBe(true);
+        expect(approxEq(B.var(a), 4.0, RELAXED_TOL)).toBe(true);
       });
 
       it('computes variance of constant array', () => {
         const a = arr([5.0, 5.0, 5.0, 5.0]);
-        expect(B.var(a, 0)).toBe(0.0);
+        expect(B.var(a)).toBe(0.0);
       });
     });
 
@@ -111,12 +104,12 @@ export function statsTests(getBackend: () => Backend) {
       it('computes standard deviation', () => {
         const a = arr([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]);
         // Population std = 2.0
-        expect(approxEq(B.std(a, 0), 2.0, RELAXED_TOL)).toBe(true);
+        expect(approxEq(B.std(a), 2.0, RELAXED_TOL)).toBe(true);
       });
 
       it('computes std of constant array', () => {
         const a = arr([5.0, 5.0, 5.0, 5.0]);
-        expect(B.std(a, 0)).toBe(0.0);
+        expect(B.std(a)).toBe(0.0);
       });
     });
 

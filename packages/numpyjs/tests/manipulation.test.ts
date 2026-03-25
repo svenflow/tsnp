@@ -4,13 +4,7 @@
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { Backend, DEFAULT_TOL, RELAXED_TOL, approxEq, arraysApproxEq } from './test-utils';
-
-// Helper to get data from arrays (handles GPU materialization)
-async function getData(arr: { toArray(): number[] }, B: Backend): Promise<number[]> {
-  if (B.materializeAll) await B.materializeAll();
-  return arr.toArray();
-}
+import { Backend, DEFAULT_TOL, RELAXED_TOL, approxEq, getData } from './test-utils';
 
 export function manipulationTests(getBackend: () => Backend) {
   describe('manipulation', () => {
@@ -123,15 +117,33 @@ export function manipulationTests(getBackend: () => Backend) {
 
     describe('moveaxis', () => {
       it('moves axis to new position', async () => {
-        const arr = B.array(Array.from({ length: 24 }, (_, i) => i), [2, 3, 4]);
+        const arr = B.array(
+          Array.from({ length: 24 }, (_, i) => i),
+          [2, 3, 4]
+        );
         const result = B.moveaxis(arr, 0, -1);
         expect(result.shape).toEqual([3, 4, 2]);
+        // Original [2,3,4] with axis 0 moved to -1 (last)
+        // Element at [i,j,k] in original maps to [j,k,i] in result
+        const data = await getData(result, B);
+        expect(data[0]).toBe(0); // [0,0,0] -> orig[0,0,0]
+        expect(data[1]).toBe(12); // [0,0,1] -> orig[1,0,0]
+        expect(data[2]).toBe(1); // [0,1,0] -> orig[0,0,1]
       });
 
       it('moves axis forward', async () => {
-        const arr = B.array(Array.from({ length: 24 }, (_, i) => i), [2, 3, 4]);
+        const arr = B.array(
+          Array.from({ length: 24 }, (_, i) => i),
+          [2, 3, 4]
+        );
         const result = B.moveaxis(arr, 2, 0);
         expect(result.shape).toEqual([4, 2, 3]);
+        // Element at [i,j,k] in original maps to [k,i,j] in result
+        const data = await getData(result, B);
+        expect(data[0]).toBe(0); // [0,0,0] -> orig[0,0,0]
+        expect(data[1]).toBe(4); // [0,0,1] -> orig[0,1,0]
+        expect(data[2]).toBe(8); // [0,0,2] -> orig[0,2,0]
+        expect(data[3]).toBe(12); // [0,1,0] -> orig[1,0,0]
       });
     });
 
@@ -312,14 +324,32 @@ export function manipulationTests(getBackend: () => Backend) {
     describe('batchedMatmul', () => {
       it('performs batched matrix multiplication', async () => {
         // Two 2x2 matrices in batch
-        const a = B.array([
-          1, 2, 3, 4,  // First 2x2
-          5, 6, 7, 8   // Second 2x2
-        ], [2, 2, 2]);
-        const b = B.array([
-          1, 0, 0, 1,  // Identity
-          1, 0, 0, 1   // Identity
-        ], [2, 2, 2]);
+        const a = B.array(
+          [
+            1,
+            2,
+            3,
+            4, // First 2x2
+            5,
+            6,
+            7,
+            8, // Second 2x2
+          ],
+          [2, 2, 2]
+        );
+        const b = B.array(
+          [
+            1,
+            0,
+            0,
+            1, // Identity
+            1,
+            0,
+            0,
+            1, // Identity
+          ],
+          [2, 2, 2]
+        );
         const result = B.batchedMatmul(a, b);
         expect(result.shape).toEqual([2, 2, 2]);
         // A @ I = A
@@ -328,10 +358,7 @@ export function manipulationTests(getBackend: () => Backend) {
 
       it('broadcasts batch dimensions', async () => {
         // (2, 2, 2) @ (2, 2) -> (2, 2, 2)
-        const a = B.array([
-          1, 2, 3, 4,
-          5, 6, 7, 8
-        ], [2, 2, 2]);
+        const a = B.array([1, 2, 3, 4, 5, 6, 7, 8], [2, 2, 2]);
         const b = B.array([1, 0, 0, 1], [2, 2]); // Single 2x2 identity
         const result = B.batchedMatmul(a, b);
         expect(result.shape).toEqual([2, 2, 2]);
@@ -344,7 +371,7 @@ export function manipulationTests(getBackend: () => Backend) {
       it('computes matrix multiplication: ij,jk->ik', async () => {
         const a = B.array([1, 2, 3, 4], [2, 2]);
         const b = B.array([1, 0, 0, 1], [2, 2]);
-        const result = B.einsum('ij,jk->ik', a, b);
+        const result = await B.einsum('ij,jk->ik', a, b);
         expect(result.shape).toEqual([2, 2]);
         // A @ I = A
         expect(await getData(result, B)).toEqual([1, 2, 3, 4]);
@@ -352,13 +379,13 @@ export function manipulationTests(getBackend: () => Backend) {
 
       it('computes trace: ii->', async () => {
         const a = B.array([1, 2, 3, 4], [2, 2]);
-        const result = B.einsum('ii->', a);
+        const result = await B.einsum('ii->', a);
         expect(await getData(result, B)).toEqual([5]); // 1 + 4
       });
 
       it('computes transpose: ij->ji', async () => {
         const a = B.array([1, 2, 3, 4, 5, 6], [2, 3]);
-        const result = B.einsum('ij->ji', a);
+        const result = await B.einsum('ij->ji', a);
         expect(result.shape).toEqual([3, 2]);
         expect(await getData(result, B)).toEqual([1, 4, 2, 5, 3, 6]);
       });
@@ -366,7 +393,7 @@ export function manipulationTests(getBackend: () => Backend) {
       it('computes outer product: i,j->ij', async () => {
         const a = B.array([1, 2, 3], [3]);
         const b = B.array([4, 5], [2]);
-        const result = B.einsum('i,j->ij', a, b);
+        const result = await B.einsum('i,j->ij', a, b);
         expect(result.shape).toEqual([3, 2]);
         expect(await getData(result, B)).toEqual([4, 5, 8, 10, 12, 15]);
       });
@@ -374,7 +401,7 @@ export function manipulationTests(getBackend: () => Backend) {
       it('computes dot product: i,i->', async () => {
         const a = B.array([1, 2, 3], [3]);
         const b = B.array([4, 5, 6], [3]);
-        const result = B.einsum('i,i->', a, b);
+        const result = await B.einsum('i,i->', a, b);
         expect(await getData(result, B)).toEqual([32]); // 1*4 + 2*5 + 3*6
       });
 
@@ -382,7 +409,7 @@ export function manipulationTests(getBackend: () => Backend) {
         // Two 2x2 matrices in batch
         const a = B.array([1, 2, 3, 4, 5, 6, 7, 8], [2, 2, 2]);
         const b = B.array([1, 0, 0, 1, 1, 0, 0, 1], [2, 2, 2]); // Two identity matrices
-        const result = B.einsum('bij,bjk->bik', a, b);
+        const result = await B.einsum('bij,bjk->bik', a, b);
         expect(result.shape).toEqual([2, 2, 2]);
         expect(await getData(result, B)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
       });
@@ -390,7 +417,7 @@ export function manipulationTests(getBackend: () => Backend) {
       it('computes element-wise multiply and sum: ij,ij->', async () => {
         const a = B.array([1, 2, 3, 4], [2, 2]);
         const b = B.array([1, 1, 1, 1], [2, 2]);
-        const result = B.einsum('ij,ij->', a, b);
+        const result = await B.einsum('ij,ij->', a, b);
         expect(await getData(result, B)).toEqual([10]); // 1+2+3+4
       });
 
@@ -398,7 +425,7 @@ export function manipulationTests(getBackend: () => Backend) {
         // ij,jk with no explicit output -> ik
         const a = B.array([1, 2, 3, 4], [2, 2]);
         const b = B.array([1, 0, 0, 1], [2, 2]);
-        const result = B.einsum('ij,jk', a, b);
+        const result = await B.einsum('ij,jk', a, b);
         expect(result.shape).toEqual([2, 2]);
       });
     });
@@ -512,7 +539,7 @@ export function manipulationTests(getBackend: () => Backend) {
       it('computes full convolution', async () => {
         const a = B.array([1, 2, 3], [3]);
         const v = B.array([0, 1, 0.5], [3]);
-        const result = B.convolve(a, v, 'full');
+        const result = await B.convolve(a, v, 'full');
         expect(result.shape).toEqual([5]);
         // [0*1, 1*1+0*2, 0.5*1+1*2+0*3, 0.5*2+1*3, 0.5*3] = [0, 1, 2.5, 4, 1.5]
         const data = await getData(result, B);
@@ -524,14 +551,14 @@ export function manipulationTests(getBackend: () => Backend) {
       it('computes same mode convolution', async () => {
         const a = B.array([1, 2, 3, 4, 5], [5]);
         const v = B.array([1, 1, 1], [3]);
-        const result = B.convolve(a, v, 'same');
+        const result = await B.convolve(a, v, 'same');
         expect(result.shape).toEqual([5]);
       });
 
       it('computes valid mode convolution', async () => {
         const a = B.array([1, 2, 3, 4, 5], [5]);
         const v = B.array([1, 1, 1], [3]);
-        const result = B.convolve(a, v, 'valid');
+        const result = await B.convolve(a, v, 'valid');
         expect(result.shape).toEqual([3]);
         expect(await getData(result, B)).toEqual([6, 9, 12]);
       });
@@ -541,7 +568,7 @@ export function manipulationTests(getBackend: () => Backend) {
       it('computes correlation', async () => {
         const a = B.array([1, 2, 3, 4, 5], [5]);
         const v = B.array([1, 1, 1], [3]);
-        const result = B.correlate(a, v, 'valid');
+        const result = await B.correlate(a, v, 'valid');
         expect(result.shape).toEqual([3]);
         expect(await getData(result, B)).toEqual([6, 9, 12]);
       });
@@ -558,264 +585,286 @@ export function manipulationTests(getBackend: () => Backend) {
     });
 
     describe('tril', () => {
-      it('extracts lower triangle', () => {
+      it('extracts lower triangle', async () => {
         const arr = B.array([1, 2, 3, 4, 5, 6, 7, 8, 9], [3, 3]);
         const result = B.tril(arr);
-        expect(result.toArray()).toEqual([1, 0, 0, 4, 5, 0, 7, 8, 9]);
+        expect(await getData(result, B)).toEqual([1, 0, 0, 4, 5, 0, 7, 8, 9]);
       });
 
-      it('extracts lower triangle with k=1', () => {
+      it('extracts lower triangle with k=1', async () => {
         const arr = B.array([1, 2, 3, 4, 5, 6, 7, 8, 9], [3, 3]);
         const result = B.tril(arr, 1);
-        expect(result.toArray()).toEqual([1, 2, 0, 4, 5, 6, 7, 8, 9]);
+        expect(await getData(result, B)).toEqual([1, 2, 0, 4, 5, 6, 7, 8, 9]);
       });
     });
 
     describe('triu', () => {
-      it('extracts upper triangle', () => {
+      it('extracts upper triangle', async () => {
         const arr = B.array([1, 2, 3, 4, 5, 6, 7, 8, 9], [3, 3]);
         const result = B.triu(arr);
-        expect(result.toArray()).toEqual([1, 2, 3, 0, 5, 6, 0, 0, 9]);
+        expect(await getData(result, B)).toEqual([1, 2, 3, 0, 5, 6, 0, 0, 9]);
       });
 
-      it('extracts upper triangle with k=-1', () => {
+      it('extracts upper triangle with k=-1', async () => {
         const arr = B.array([1, 2, 3, 4, 5, 6, 7, 8, 9], [3, 3]);
         const result = B.triu(arr, -1);
-        expect(result.toArray()).toEqual([1, 2, 3, 4, 5, 6, 0, 8, 9]);
+        expect(await getData(result, B)).toEqual([1, 2, 3, 4, 5, 6, 0, 8, 9]);
       });
     });
 
     // ============ Grid Creation ============
 
     describe('meshgrid', () => {
-      it('creates coordinate matrices', () => {
+      it('creates coordinate matrices', async () => {
         const x = B.array([1, 2, 3], [3]);
         const y = B.array([4, 5], [2]);
-        const { X, Y } = B.meshgrid(x, y);
+        const [X, Y] = B.meshgrid(x, y);
         expect(X.shape).toEqual([2, 3]);
         expect(Y.shape).toEqual([2, 3]);
-        expect(X.toArray()).toEqual([1, 2, 3, 1, 2, 3]);
-        expect(Y.toArray()).toEqual([4, 4, 4, 5, 5, 5]);
+        expect(await getData(X, B)).toEqual([1, 2, 3, 1, 2, 3]);
+        expect(await getData(Y, B)).toEqual([4, 4, 4, 5, 5, 5]);
       });
     });
 
     describe('logspace', () => {
-      it('creates log-spaced array', () => {
+      it('creates log-spaced array', async () => {
         const result = B.logspace(0, 2, 3);
         expect(result.shape).toEqual([3]);
-        const data = result.toArray();
-        expect(approxEq(data[0], 1, DEFAULT_TOL)).toBe(true);
-        expect(approxEq(data[1], 10, DEFAULT_TOL)).toBe(true);
-        expect(approxEq(data[2], 100, DEFAULT_TOL)).toBe(true);
+        const data = await getData(result, B);
+        // Use relative tolerance: f32 has ~7 digits precision
+        expect(Math.abs(data[0] - 1) / 1).toBeLessThan(1e-5);
+        expect(Math.abs(data[1] - 10) / 10).toBeLessThan(1e-5);
+        expect(Math.abs(data[2] - 100) / 100).toBeLessThan(1e-5);
       });
 
-      it('uses custom base', () => {
+      it('uses custom base', async () => {
         const result = B.logspace(0, 3, 4, 2);
-        const data = result.toArray();
-        expect(approxEq(data[0], 1, DEFAULT_TOL)).toBe(true);
-        expect(approxEq(data[1], 2, DEFAULT_TOL)).toBe(true);
-        expect(approxEq(data[2], 4, DEFAULT_TOL)).toBe(true);
-        expect(approxEq(data[3], 8, DEFAULT_TOL)).toBe(true);
+        const data = await getData(result, B);
+        expect(Math.abs(data[0] - 1) / 1).toBeLessThan(1e-5);
+        expect(Math.abs(data[1] - 2) / 2).toBeLessThan(1e-5);
+        expect(Math.abs(data[2] - 4) / 4).toBeLessThan(1e-5);
+        expect(Math.abs(data[3] - 8) / 8).toBeLessThan(1e-5);
       });
     });
 
     describe('geomspace', () => {
-      it('creates geometrically-spaced array', () => {
+      it('creates geometrically-spaced array', async () => {
         const result = B.geomspace(1, 1000, 4);
         expect(result.shape).toEqual([4]);
-        const data = result.toArray();
-        expect(approxEq(data[0], 1, DEFAULT_TOL)).toBe(true);
-        expect(approxEq(data[1], 10, DEFAULT_TOL)).toBe(true);
-        expect(approxEq(data[2], 100, DEFAULT_TOL)).toBe(true);
-        expect(approxEq(data[3], 1000, DEFAULT_TOL)).toBe(true);
+        const data = await getData(result, B);
+        expect(Math.abs(data[0] - 1) / 1).toBeLessThan(1e-5);
+        expect(Math.abs(data[1] - 10) / 10).toBeLessThan(1e-5);
+        expect(Math.abs(data[2] - 100) / 100).toBeLessThan(1e-5);
+        expect(Math.abs(data[3] - 1000) / 1000).toBeLessThan(1e-5);
       });
     });
 
     // ============ Stacking Shortcuts ============
 
     describe('vstack', () => {
-      it('stacks 1D arrays vertically', () => {
+      it('stacks 1D arrays vertically', async () => {
         const a = B.array([1, 2, 3], [3]);
         const b = B.array([4, 5, 6], [3]);
         const result = B.vstack([a, b]);
         expect(result.shape).toEqual([2, 3]);
-        expect(result.toArray()).toEqual([1, 2, 3, 4, 5, 6]);
+        expect(await getData(result, B)).toEqual([1, 2, 3, 4, 5, 6]);
       });
 
-      it('stacks 2D arrays vertically', () => {
+      it('stacks 2D arrays vertically', async () => {
         const a = B.array([1, 2], [1, 2]);
         const b = B.array([3, 4], [1, 2]);
         const result = B.vstack([a, b]);
         expect(result.shape).toEqual([2, 2]);
+        expect(await getData(result, B)).toEqual([1, 2, 3, 4]);
       });
     });
 
     describe('hstack', () => {
-      it('stacks 1D arrays horizontally', () => {
+      it('stacks 1D arrays horizontally', async () => {
         const a = B.array([1, 2], [2]);
         const b = B.array([3, 4, 5], [3]);
         const result = B.hstack([a, b]);
         expect(result.shape).toEqual([5]);
-        expect(result.toArray()).toEqual([1, 2, 3, 4, 5]);
+        expect(await getData(result, B)).toEqual([1, 2, 3, 4, 5]);
       });
 
-      it('stacks 2D arrays horizontally', () => {
+      it('stacks 2D arrays horizontally', async () => {
         const a = B.array([1, 2, 3, 4], [2, 2]);
         const b = B.array([5, 6], [2, 1]);
         const result = B.hstack([a, b]);
         expect(result.shape).toEqual([2, 3]);
+        expect(await getData(result, B)).toEqual([1, 2, 5, 3, 4, 6]);
       });
     });
 
     describe('dstack', () => {
-      it('stacks arrays along third axis', () => {
+      it('stacks arrays along third axis', async () => {
         const a = B.array([1, 2, 3, 4], [2, 2]);
         const b = B.array([5, 6, 7, 8], [2, 2]);
         const result = B.dstack([a, b]);
         expect(result.shape).toEqual([2, 2, 2]);
+        expect(await getData(result, B)).toEqual([1, 5, 2, 6, 3, 7, 4, 8]);
       });
     });
 
     // ============ Split Shortcuts ============
 
     describe('vsplit', () => {
-      it('splits array vertically', () => {
+      it('splits array vertically', async () => {
         const arr = B.array([1, 2, 3, 4, 5, 6], [3, 2]);
         const parts = B.vsplit(arr, 3);
         expect(parts.length).toBe(3);
         expect(parts[0].shape).toEqual([1, 2]);
+        expect(await getData(parts[0], B)).toEqual([1, 2]);
+        expect(await getData(parts[1], B)).toEqual([3, 4]);
+        expect(await getData(parts[2], B)).toEqual([5, 6]);
       });
     });
 
     describe('hsplit', () => {
-      it('splits array horizontally', () => {
+      it('splits array horizontally', async () => {
         const arr = B.array([1, 2, 3, 4, 5, 6], [2, 3]);
         const parts = B.hsplit(arr, 3);
         expect(parts.length).toBe(3);
         expect(parts[0].shape).toEqual([2, 1]);
+        expect(await getData(parts[0], B)).toEqual([1, 4]);
+        expect(await getData(parts[1], B)).toEqual([2, 5]);
+        expect(await getData(parts[2], B)).toEqual([3, 6]);
       });
 
-      it('splits 1D array', () => {
+      it('splits 1D array', async () => {
         const arr = B.array([1, 2, 3, 4, 5, 6], [6]);
         const parts = B.hsplit(arr, 3);
         expect(parts.length).toBe(3);
-        expect(parts[0].toArray()).toEqual([1, 2]);
+        expect(await getData(parts[0], B)).toEqual([1, 2]);
       });
     });
 
     describe('dsplit', () => {
-      it('splits array along third axis', () => {
-        const arr = B.array(Array.from({ length: 12 }, (_, i) => i), [2, 2, 3]);
+      it('splits array along third axis', async () => {
+        const arr = B.array(
+          Array.from({ length: 12 }, (_, i) => i),
+          [2, 2, 3]
+        );
         const parts = B.dsplit(arr, 3);
         expect(parts.length).toBe(3);
         expect(parts[0].shape).toEqual([2, 2, 1]);
+        expect(await getData(parts[0], B)).toEqual([0, 3, 6, 9]);
+        expect(await getData(parts[1], B)).toEqual([1, 4, 7, 10]);
+        expect(await getData(parts[2], B)).toEqual([2, 5, 8, 11]);
       });
     });
 
     // ============ Array Replication ============
 
     describe('tile', () => {
-      it('tiles array', () => {
+      it('tiles array', async () => {
         const arr = B.array([1, 2], [2]);
         const result = B.tile(arr, 3);
         expect(result.shape).toEqual([6]);
-        expect(result.toArray()).toEqual([1, 2, 1, 2, 1, 2]);
+        expect(await getData(result, B)).toEqual([1, 2, 1, 2, 1, 2]);
       });
 
-      it('tiles array with multiple reps', () => {
+      it('tiles array with multiple reps', async () => {
         const arr = B.array([1, 2, 3, 4], [2, 2]);
         const result = B.tile(arr, [2, 3]);
         expect(result.shape).toEqual([4, 6]);
+        // [[1,2],[3,4]] tiled [2,3] -> rows repeated 2x, cols repeated 3x
+        expect(await getData(result, B)).toEqual([
+          1, 2, 1, 2, 1, 2, 3, 4, 3, 4, 3, 4, 1, 2, 1, 2, 1, 2, 3, 4, 3, 4, 3, 4,
+        ]);
       });
     });
 
     describe('repeat', () => {
-      it('repeats elements', () => {
+      it('repeats elements', async () => {
         const arr = B.array([1, 2, 3], [3]);
         const result = B.repeat(arr, 2);
         expect(result.shape).toEqual([6]);
-        expect(result.toArray()).toEqual([1, 1, 2, 2, 3, 3]);
+        expect(await getData(result, B)).toEqual([1, 1, 2, 2, 3, 3]);
       });
 
-      it('repeats along axis', () => {
+      it('repeats along axis', async () => {
         const arr = B.array([1, 2, 3, 4], [2, 2]);
         const result = B.repeat(arr, 2, 0);
         expect(result.shape).toEqual([4, 2]);
+        // [[1,2],[3,4]] repeat 2 along axis 0 -> [[1,2],[1,2],[3,4],[3,4]]
+        expect(await getData(result, B)).toEqual([1, 2, 1, 2, 3, 4, 3, 4]);
       });
     });
 
     // ============ Index Finding ============
 
     describe('nonzero', () => {
-      it('finds non-zero indices', () => {
+      it('finds non-zero indices', async () => {
         const arr = B.array([0, 1, 0, 2, 3, 0], [6]);
         const result = B.nonzero(arr);
         expect(result.length).toBe(1);
-        expect(result[0].toArray()).toEqual([1, 3, 4]);
+        expect(await getData(result[0], B)).toEqual([1, 3, 4]);
       });
 
-      it('finds non-zero indices in 2D', () => {
+      it('finds non-zero indices in 2D', async () => {
         const arr = B.array([1, 0, 0, 2, 0, 3], [2, 3]);
         const result = B.nonzero(arr);
         expect(result.length).toBe(2);
-        expect(result[0].toArray()).toEqual([0, 1, 1]); // row indices
-        expect(result[1].toArray()).toEqual([0, 0, 2]); // col indices
+        expect(await getData(result[0], B)).toEqual([0, 1, 1]); // row indices
+        expect(await getData(result[1], B)).toEqual([0, 0, 2]); // col indices
       });
     });
 
     describe('argwhere', () => {
-      it('returns indices as rows', () => {
+      it('returns indices as rows', async () => {
         const arr = B.array([1, 0, 0, 2, 0, 3], [2, 3]);
         const result = B.argwhere(arr);
         expect(result.shape).toEqual([3, 2]);
-        expect(result.toArray()).toEqual([0, 0, 1, 0, 1, 2]);
+        expect(await getData(result, B)).toEqual([0, 0, 1, 0, 1, 2]);
       });
     });
 
     describe('flatnonzero', () => {
-      it('returns flat indices', () => {
+      it('returns flat indices', async () => {
         const arr = B.array([0, 1, 0, 2, 3, 0], [6]);
         const result = B.flatnonzero(arr);
-        expect(result.toArray()).toEqual([1, 3, 4]);
+        expect(await getData(result, B)).toEqual([1, 3, 4]);
       });
     });
 
     // ============ Value Handling ============
 
     describe('nanToNum', () => {
-      it('replaces NaN with 0', () => {
+      it('replaces NaN with 0', async () => {
         const arr = B.array([1, NaN, 3], [3]);
         const result = B.nanToNum(arr);
-        expect(result.toArray()).toEqual([1, 0, 3]);
+        expect(await getData(result, B)).toEqual([1, 0, 3]);
       });
 
-      it('replaces Inf values', () => {
+      it('replaces Inf values', async () => {
         const arr = B.array([1, Infinity, -Infinity], [3]);
         const result = B.nanToNum(arr, 0, 999, -999);
-        expect(result.toArray()).toEqual([1, 999, -999]);
+        expect(await getData(result, B)).toEqual([1, 999, -999]);
       });
     });
 
     // ============ Sorting ============
 
     describe('sort', () => {
-      it('sorts 1D array', () => {
+      it('sorts 1D array', async () => {
         const arr = B.array([3, 1, 4, 1, 5, 9, 2, 6], [8]);
         const result = B.sort(arr);
-        expect(result.toArray()).toEqual([1, 1, 2, 3, 4, 5, 6, 9]);
+        expect(await getData(result, B)).toEqual([1, 1, 2, 3, 4, 5, 6, 9]);
       });
 
-      it('sorts 2D array along axis', () => {
+      it('sorts 2D array along axis', async () => {
         const arr = B.array([3, 1, 2, 6, 5, 4], [2, 3]);
         const result = B.sort(arr, 1);
         expect(result.shape).toEqual([2, 3]);
-        expect(result.toArray()).toEqual([1, 2, 3, 4, 5, 6]);
+        expect(await getData(result, B)).toEqual([1, 2, 3, 4, 5, 6]);
       });
 
-      it('handles NaN (sorts to end)', () => {
+      it('handles NaN (sorts to end)', async () => {
         const arr = B.array([3, NaN, 1, 2], [4]);
         const result = B.sort(arr);
-        const data = result.toArray();
+        const data = await getData(result, B);
         expect(data[0]).toBe(1);
         expect(data[1]).toBe(2);
         expect(data[2]).toBe(3);
@@ -824,17 +873,17 @@ export function manipulationTests(getBackend: () => Backend) {
     });
 
     describe('argsort', () => {
-      it('returns sort indices', () => {
+      it('returns sort indices', async () => {
         const arr = B.array([3, 1, 2], [3]);
         const result = B.argsort(arr);
-        expect(result.toArray()).toEqual([1, 2, 0]);
+        expect(await getData(result, B)).toEqual([1, 2, 0]);
       });
 
-      it('returns sort indices for 2D along axis', () => {
+      it('returns sort indices for 2D along axis', async () => {
         const arr = B.array([3, 1, 2, 6, 5, 4], [2, 3]);
         const result = B.argsort(arr, 1);
         expect(result.shape).toEqual([2, 3]);
-        expect(result.toArray()).toEqual([1, 2, 0, 2, 1, 0]);
+        expect(await getData(result, B)).toEqual([1, 2, 0, 2, 1, 0]);
       });
     });
 
@@ -845,19 +894,19 @@ export function manipulationTests(getBackend: () => Backend) {
         expect(B.searchsorted(arr, 3, 'right')).toBe(3);
       });
 
-      it('finds insertion points for array', () => {
+      it('finds insertion points for array', async () => {
         const arr = B.array([1, 2, 3, 4, 5], [5]);
         const v = B.array([0, 3, 6], [3]);
         const result = B.searchsorted(arr, v) as any;
-        expect(result.toArray()).toEqual([0, 2, 5]);
+        expect(await getData(result, B)).toEqual([0, 2, 5]);
       });
     });
 
     describe('unique', () => {
-      it('returns unique values sorted', () => {
+      it('returns unique values sorted', async () => {
         const arr = B.array([3, 1, 2, 1, 3, 2, 4], [7]);
         const result = B.unique(arr);
-        expect(result.toArray()).toEqual([1, 2, 3, 4]);
+        expect(await getData(result, B)).toEqual([1, 2, 3, 4]);
       });
     });
   });

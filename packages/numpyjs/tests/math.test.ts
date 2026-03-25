@@ -4,13 +4,7 @@
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { Backend, DEFAULT_TOL, RELAXED_TOL, approxEq, getTol } from './test-utils';
-
-// Helper to get data from arrays (handles GPU materialization)
-async function getData(arr: { toArray(): number[] }, B: Backend): Promise<number[]> {
-  if (B.materializeAll) await B.materializeAll();
-  return arr.toArray();
-}
+import { Backend, approxEq, getTol, getData } from './test-utils';
 
 // Get tolerance appropriate for backend (f64 vs f32)
 function tol(B: Backend, relaxed: boolean = false): number {
@@ -90,7 +84,9 @@ export function mathTests(getBackend: () => Backend) {
 
         // Identity: cosh^2 - sinh^2 = 1
         for (let i = 0; i < 3; i++) {
-          expect(approxEq(coshData[i] * coshData[i] - sinhData[i] * sinhData[i], 1.0, tol(B))).toBe(true);
+          expect(approxEq(coshData[i] * coshData[i] - sinhData[i] * sinhData[i], 1.0, tol(B))).toBe(
+            true
+          );
         }
       });
 
@@ -254,9 +250,9 @@ export function mathTests(getBackend: () => Backend) {
         expect(data).toEqual([-1.0, -1.0, 0.0, 1.0, 1.0]);
       });
 
-      it('computes neg', async () => {
+      it('computes negative', async () => {
         const a = arr([-2.0, -1.0, 0.0, 1.0, 2.0]);
-        const result = B.neg(a);
+        const result = B.negative(a);
         const data = await getData(result, B);
         expect(approxEq(data[0], 2.0, tol(B))).toBe(true);
         expect(approxEq(data[1], 1.0, tol(B))).toBe(true);
@@ -287,7 +283,7 @@ export function mathTests(getBackend: () => Backend) {
       it('subtracts arrays', async () => {
         const a = arr([5.0, 7.0, 9.0]);
         const b = arr([1.0, 2.0, 3.0]);
-        const result = B.sub(a, b);
+        const result = B.subtract(a, b);
         const data = await getData(result, B);
         expect(data).toEqual([4.0, 5.0, 6.0]);
       });
@@ -295,7 +291,7 @@ export function mathTests(getBackend: () => Backend) {
       it('multiplies arrays element-wise', async () => {
         const a = arr([1.0, 2.0, 3.0]);
         const b = arr([2.0, 3.0, 4.0]);
-        const result = B.mul(a, b);
+        const result = B.multiply(a, b);
         const data = await getData(result, B);
         expect(data).toEqual([2.0, 6.0, 12.0]);
       });
@@ -303,7 +299,7 @@ export function mathTests(getBackend: () => Backend) {
       it('divides arrays element-wise', async () => {
         const a = arr([4.0, 9.0, 16.0]);
         const b = arr([2.0, 3.0, 4.0]);
-        const result = B.div(a, b);
+        const result = B.divide(a, b);
         const data = await getData(result, B);
         expect(data).toEqual([2.0, 3.0, 4.0]);
       });
@@ -311,7 +307,7 @@ export function mathTests(getBackend: () => Backend) {
       it('raises to power', async () => {
         const a = arr([2.0, 3.0, 4.0]);
         const b = arr([2.0, 2.0, 2.0]);
-        const result = B.pow(a, b);
+        const result = B.power(a, b);
         const data = await getData(result, B);
         expect(data).toEqual([4.0, 9.0, 16.0]);
       });
@@ -336,9 +332,9 @@ export function mathTests(getBackend: () => Backend) {
         const a = arr([1.0, 2.0, 3.0]);
         const b = arr([1.0, 2.0]);
         expect(() => B.add(a, b)).toThrow();
-        expect(() => B.sub(a, b)).toThrow();
-        expect(() => B.mul(a, b)).toThrow();
-        expect(() => B.div(a, b)).toThrow();
+        expect(() => B.subtract(a, b)).toThrow();
+        expect(() => B.multiply(a, b)).toThrow();
+        expect(() => B.divide(a, b)).toThrow();
       });
     });
 
@@ -439,7 +435,7 @@ export function mathTests(getBackend: () => Backend) {
         const data = await getData(result, B);
 
         expect(data[0]).toBe(-2.0);
-        expect(Object.is(data[1], 0) || Object.is(data[1], -0)).toBe(true);  // trunc(-0.5) = -0 or 0
+        expect(Object.is(data[1], 0) || Object.is(data[1], -0)).toBe(true); // trunc(-0.5) = -0 or 0
         expect(data[2]).toBe(0.0);
         expect(data[3]).toBe(0.0);
         expect(data[4]).toBe(2.0);
@@ -451,7 +447,7 @@ export function mathTests(getBackend: () => Backend) {
         const data = await getData(result, B);
 
         expect(data[0]).toBe(-2.0);
-        expect(Object.is(data[1], 0) || Object.is(data[1], -0)).toBe(true);  // fix(-0.5) = -0 or 0
+        expect(Object.is(data[1], 0) || Object.is(data[1], -0)).toBe(true); // fix(-0.5) = -0 or 0
         expect(data[2]).toBe(0.0);
         expect(data[3]).toBe(0.0);
         expect(data[4]).toBe(2.0);
@@ -496,7 +492,7 @@ export function mathTests(getBackend: () => Backend) {
 
       it('computes heaviside', async () => {
         const a = arr([-2.0, -0.5, 0.0, 0.5, 2.0]);
-        const result = B.heaviside(a, 0.5);  // h0 = 0.5 at x = 0
+        const result = B.heaviside(a, 0.5); // h0 = 0.5 at x = 0
         const data = await getData(result, B);
         expect(data).toEqual([0.0, 0.0, 0.5, 1.0, 1.0]);
       });
@@ -506,25 +502,25 @@ export function mathTests(getBackend: () => Backend) {
         const result = B.signbit(a);
         const data = await getData(result, B);
 
-        expect(data[0]).toBe(1.0);  // negative
+        expect(data[0]).toBe(1.0); // negative
         // Note: -0 detection varies by implementation
-        expect(data[2]).toBe(0.0);  // +0
-        expect(data[3]).toBe(0.0);  // positive
-        expect(data[4]).toBe(0.0);  // positive
+        expect(data[2]).toBe(0.0); // +0
+        expect(data[3]).toBe(0.0); // positive
+        expect(data[4]).toBe(0.0); // positive
       });
 
       it('computes signbit with NaN', async () => {
         const a = arr([NaN]);
         const result = B.signbit(a);
         const data = await getData(result, B);
-        expect(data[0]).toBe(0.0);  // signbit(NaN) = 0 (NumPy: False)
+        expect(data[0]).toBe(0.0); // signbit(NaN) = 0 (NumPy: False)
       });
 
       it('computes signbit with negative zero', async () => {
         const a = arr([-0.0]);
         const result = B.signbit(a);
         const data = await getData(result, B);
-        expect(data[0]).toBe(1.0);  // signbit(-0) = 1 (NumPy: True)
+        expect(data[0]).toBe(1.0); // signbit(-0) = 1 (NumPy: True)
       });
     });
 
@@ -557,22 +553,22 @@ export function mathTests(getBackend: () => Backend) {
 
         // frexp returns (mantissa, exp) such that x = mantissa * 2^exp
         // where 0.5 <= |mantissa| < 1
-        expect(mantissa[0]).toBe(0.0);  // frexp(0) = (0, 0)
+        expect(mantissa[0]).toBe(0.0); // frexp(0) = (0, 0)
         expect(exponent[0]).toBe(0);
 
-        expect(approxEq(mantissa[1], 0.5, tol(B))).toBe(true);  // 1 = 0.5 * 2^1
+        expect(approxEq(mantissa[1], 0.5, tol(B))).toBe(true); // 1 = 0.5 * 2^1
         expect(exponent[1]).toBe(1);
 
-        expect(approxEq(mantissa[2], 0.5, tol(B))).toBe(true);  // 2 = 0.5 * 2^2
+        expect(approxEq(mantissa[2], 0.5, tol(B))).toBe(true); // 2 = 0.5 * 2^2
         expect(exponent[2]).toBe(2);
 
-        expect(approxEq(mantissa[3], 0.5, tol(B))).toBe(true);  // 4 = 0.5 * 2^3
+        expect(approxEq(mantissa[3], 0.5, tol(B))).toBe(true); // 4 = 0.5 * 2^3
         expect(exponent[3]).toBe(3);
 
-        expect(approxEq(mantissa[4], 0.5, tol(B))).toBe(true);  // 8 = 0.5 * 2^4
+        expect(approxEq(mantissa[4], 0.5, tol(B))).toBe(true); // 8 = 0.5 * 2^4
         expect(exponent[4]).toBe(4);
 
-        expect(approxEq(mantissa[5], -0.5, tol(B))).toBe(true);  // -2 = -0.5 * 2^2
+        expect(approxEq(mantissa[5], -0.5, tol(B))).toBe(true); // -2 = -0.5 * 2^2
         expect(exponent[5]).toBe(2);
       });
 
@@ -582,11 +578,11 @@ export function mathTests(getBackend: () => Backend) {
         const result = B.ldexp(mantissa, exp);
         const data = await getData(result, B);
 
-        expect(data[0]).toBe(1.0);   // 0.5 * 2^1 = 1
-        expect(data[1]).toBe(2.0);   // 0.5 * 2^2 = 2
-        expect(data[2]).toBe(4.0);   // 0.5 * 2^3 = 4
-        expect(data[3]).toBe(3.0);   // 0.75 * 2^2 = 3
-        expect(data[4]).toBe(-4.0);  // -0.5 * 2^3 = -4
+        expect(data[0]).toBe(1.0); // 0.5 * 2^1 = 1
+        expect(data[1]).toBe(2.0); // 0.5 * 2^2 = 2
+        expect(data[2]).toBe(4.0); // 0.5 * 2^3 = 4
+        expect(data[3]).toBe(3.0); // 0.75 * 2^2 = 3
+        expect(data[4]).toBe(-4.0); // -0.5 * 2^3 = -4
       });
 
       it('frexp and ldexp are inverse operations', async () => {
@@ -609,20 +605,20 @@ export function mathTests(getBackend: () => Backend) {
         const remainder = await getData(result.remainder, B);
 
         // Python-style floor division and modulo
-        expect(quotient[0]).toBe(2.0);   // 7 // 3 = 2
-        expect(approxEq(remainder[0], 1.0, tol(B))).toBe(true);   // 7 % 3 = 1
+        expect(quotient[0]).toBe(2.0); // 7 // 3 = 2
+        expect(approxEq(remainder[0], 1.0, tol(B))).toBe(true); // 7 % 3 = 1
 
-        expect(quotient[1]).toBe(-3.0);  // -7 // 3 = -3 (floor)
-        expect(approxEq(remainder[1], 2.0, tol(B))).toBe(true);   // -7 % 3 = 2
+        expect(quotient[1]).toBe(-3.0); // -7 // 3 = -3 (floor)
+        expect(approxEq(remainder[1], 2.0, tol(B))).toBe(true); // -7 % 3 = 2
 
-        expect(quotient[2]).toBe(-3.0);  // 7 // -3 = -3 (floor)
-        expect(approxEq(remainder[2], -2.0, tol(B))).toBe(true);  // 7 % -3 = -2
+        expect(quotient[2]).toBe(-3.0); // 7 // -3 = -3 (floor)
+        expect(approxEq(remainder[2], -2.0, tol(B))).toBe(true); // 7 % -3 = -2
 
-        expect(quotient[3]).toBe(2.0);   // -7 // -3 = 2 (floor)
-        expect(approxEq(remainder[3], -1.0, tol(B))).toBe(true);  // -7 % -3 = -1
+        expect(quotient[3]).toBe(2.0); // -7 // -3 = 2 (floor)
+        expect(approxEq(remainder[3], -1.0, tol(B))).toBe(true); // -7 % -3 = -1
 
-        expect(quotient[4]).toBe(2.0);   // 5.5 // 2 = 2
-        expect(approxEq(remainder[4], 1.5, tol(B))).toBe(true);   // 5.5 % 2 = 1.5
+        expect(quotient[4]).toBe(2.0); // 5.5 // 2 = 2
+        expect(approxEq(remainder[4], 1.5, tol(B))).toBe(true); // 5.5 % 2 = 1.5
       });
     });
 
@@ -635,10 +631,10 @@ export function mathTests(getBackend: () => Backend) {
         const result = B.mod(a, b);
         const data = await getData(result, B);
 
-        expect(approxEq(data[0], 1.0, tol(B))).toBe(true);   // 7 % 3 = 1
-        expect(approxEq(data[1], 2.0, tol(B))).toBe(true);   // -7 % 3 = 2
-        expect(approxEq(data[2], -2.0, tol(B))).toBe(true);  // 7 % -3 = -2
-        expect(approxEq(data[3], -1.0, tol(B))).toBe(true);  // -7 % -3 = -1
+        expect(approxEq(data[0], 1.0, tol(B))).toBe(true); // 7 % 3 = 1
+        expect(approxEq(data[1], 2.0, tol(B))).toBe(true); // -7 % 3 = 2
+        expect(approxEq(data[2], -2.0, tol(B))).toBe(true); // 7 % -3 = -2
+        expect(approxEq(data[3], -1.0, tol(B))).toBe(true); // -7 % -3 = -1
       });
 
       it('computes fmod (C-style modulo)', async () => {
@@ -647,10 +643,10 @@ export function mathTests(getBackend: () => Backend) {
         const result = B.fmod(a, b);
         const data = await getData(result, B);
 
-        expect(approxEq(data[0], 1.0, tol(B))).toBe(true);   // 7 % 3 = 1
-        expect(approxEq(data[1], -1.0, tol(B))).toBe(true);  // -7 % 3 = -1
-        expect(approxEq(data[2], 1.0, tol(B))).toBe(true);   // 7 % -3 = 1
-        expect(approxEq(data[3], -1.0, tol(B))).toBe(true);  // -7 % -3 = -1
+        expect(approxEq(data[0], 1.0, tol(B))).toBe(true); // 7 % 3 = 1
+        expect(approxEq(data[1], -1.0, tol(B))).toBe(true); // -7 % 3 = -1
+        expect(approxEq(data[2], 1.0, tol(B))).toBe(true); // 7 % -3 = 1
+        expect(approxEq(data[3], -1.0, tol(B))).toBe(true); // -7 % -3 = -1
       });
 
       it('computes copysign', async () => {
@@ -659,11 +655,11 @@ export function mathTests(getBackend: () => Backend) {
         const result = B.copysign(a, b);
         const data = await getData(result, B);
 
-        expect(data[0]).toBe(1.0);   // |1| * sign(1) = 1
-        expect(data[1]).toBe(1.0);   // |-1| * sign(1) = 1
-        expect(data[2]).toBe(-1.0);  // |1| * sign(-1) = -1
-        expect(data[3]).toBe(-1.0);  // |-1| * sign(-1) = -1
-        expect(data[4]).toBe(-0.0);  // |0| * sign(-1) = -0
+        expect(data[0]).toBe(1.0); // |1| * sign(1) = 1
+        expect(data[1]).toBe(1.0); // |-1| * sign(1) = 1
+        expect(data[2]).toBe(-1.0); // |1| * sign(-1) = -1
+        expect(data[3]).toBe(-1.0); // |-1| * sign(-1) = -1
+        expect(data[4]).toBe(-0.0); // |0| * sign(-1) = -0
       });
 
       it('computes copysign with signed zeros', async () => {
@@ -688,10 +684,10 @@ export function mathTests(getBackend: () => Backend) {
         const result = B.hypot(a, b);
         const data = await getData(result, B);
 
-        expect(approxEq(data[0], 5.0, tol(B))).toBe(true);   // sqrt(9+16) = 5
-        expect(approxEq(data[1], 13.0, tol(B))).toBe(true);  // sqrt(25+144) = 13
-        expect(approxEq(data[2], 0.0, tol(B))).toBe(true);   // sqrt(0+0) = 0
-        expect(approxEq(data[3], Math.sqrt(2), tol(B))).toBe(true);  // sqrt(1+1)
+        expect(approxEq(data[0], 5.0, tol(B))).toBe(true); // sqrt(9+16) = 5
+        expect(approxEq(data[1], 13.0, tol(B))).toBe(true); // sqrt(25+144) = 13
+        expect(approxEq(data[2], 0.0, tol(B))).toBe(true); // sqrt(0+0) = 0
+        expect(approxEq(data[3], Math.sqrt(2), tol(B))).toBe(true); // sqrt(1+1)
       });
 
       it('computes arctan2', async () => {
@@ -700,10 +696,10 @@ export function mathTests(getBackend: () => Backend) {
         const result = B.arctan2(y, x);
         const data = await getData(result, B);
 
-        expect(approxEq(data[0], 0.0, tol(B))).toBe(true);           // atan2(0, 1) = 0
-        expect(approxEq(data[1], Math.PI / 2, tol(B))).toBe(true);   // atan2(1, 0) = pi/2
-        expect(approxEq(data[2], -Math.PI / 2, tol(B))).toBe(true);  // atan2(-1, 0) = -pi/2
-        expect(approxEq(data[3], Math.PI, tol(B))).toBe(true);       // atan2(0, -1) = pi
+        expect(approxEq(data[0], 0.0, tol(B))).toBe(true); // atan2(0, 1) = 0
+        expect(approxEq(data[1], Math.PI / 2, tol(B))).toBe(true); // atan2(1, 0) = pi/2
+        expect(approxEq(data[2], -Math.PI / 2, tol(B))).toBe(true); // atan2(-1, 0) = -pi/2
+        expect(approxEq(data[3], Math.PI, tol(B))).toBe(true); // atan2(0, -1) = pi
       });
 
       it('computes logaddexp', async () => {
@@ -713,10 +709,10 @@ export function mathTests(getBackend: () => Backend) {
         const data = await getData(result, B);
 
         // logaddexp(a, b) = log(exp(a) + exp(b))
-        expect(approxEq(data[0], Math.log(2), tol(B))).toBe(true);      // log(1+1) = ln(2)
+        expect(approxEq(data[0], Math.log(2), tol(B))).toBe(true); // log(1+1) = ln(2)
         expect(approxEq(data[1], Math.log(Math.E + Math.E * Math.E), tol(B, true))).toBe(true);
         expect(approxEq(data[2], Math.log(2 * Math.E * Math.E), tol(B, true))).toBe(true);
-        expect(approxEq(data[3], 0.0, tol(B))).toBe(true);  // log(0 + 1) = 0
+        expect(approxEq(data[3], 0.0, tol(B))).toBe(true); // log(0 + 1) = 0
       });
 
       it('computes logaddexp2', async () => {
@@ -726,10 +722,10 @@ export function mathTests(getBackend: () => Backend) {
         const data = await getData(result, B);
 
         // logaddexp2(a, b) = log2(2^a + 2^b)
-        expect(approxEq(data[0], 1.0, tol(B))).toBe(true);      // log2(1+1) = 1
-        expect(approxEq(data[1], Math.log2(2 + 4), tol(B, true))).toBe(true);  // log2(2^1 + 2^2) = log2(6)
-        expect(approxEq(data[2], 3.0, tol(B, true))).toBe(true);      // log2(4+4) = log2(8) = 3
-        expect(approxEq(data[3], 0.0, tol(B))).toBe(true);      // log2(0 + 1) = 0
+        expect(approxEq(data[0], 1.0, tol(B))).toBe(true); // log2(1+1) = 1
+        expect(approxEq(data[1], Math.log2(2 + 4), tol(B, true))).toBe(true); // log2(2^1 + 2^2) = log2(6)
+        expect(approxEq(data[2], 3.0, tol(B, true))).toBe(true); // log2(4+4) = log2(8) = 3
+        expect(approxEq(data[3], 0.0, tol(B))).toBe(true); // log2(0 + 1) = 0
       });
 
       it('computes fmax (ignoring NaN)', async () => {
@@ -738,10 +734,10 @@ export function mathTests(getBackend: () => Backend) {
         const result = B.fmax(a, b);
         const data = await getData(result, B);
 
-        expect(data[0]).toBe(2.0);  // max(1, 2) = 2
-        expect(data[1]).toBe(2.0);  // fmax ignores NaN in a
-        expect(data[2]).toBe(3.0);  // fmax ignores NaN in b
-        expect(Number.isNaN(data[3])).toBe(true);  // both NaN -> NaN
+        expect(data[0]).toBe(2.0); // max(1, 2) = 2
+        expect(data[1]).toBe(2.0); // fmax ignores NaN in a
+        expect(data[2]).toBe(3.0); // fmax ignores NaN in b
+        expect(Number.isNaN(data[3])).toBe(true); // both NaN -> NaN
       });
 
       it('computes fmin (ignoring NaN)', async () => {
@@ -750,10 +746,10 @@ export function mathTests(getBackend: () => Backend) {
         const result = B.fmin(a, b);
         const data = await getData(result, B);
 
-        expect(data[0]).toBe(1.0);  // min(1, 2) = 1
-        expect(data[1]).toBe(2.0);  // fmin ignores NaN in a
-        expect(data[2]).toBe(3.0);  // fmin ignores NaN in b
-        expect(Number.isNaN(data[3])).toBe(true);  // both NaN -> NaN
+        expect(data[0]).toBe(1.0); // min(1, 2) = 1
+        expect(data[1]).toBe(2.0); // fmin ignores NaN in a
+        expect(data[2]).toBe(3.0); // fmin ignores NaN in b
+        expect(Number.isNaN(data[3])).toBe(true); // both NaN -> NaN
       });
     });
   });
