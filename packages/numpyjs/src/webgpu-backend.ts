@@ -219,8 +219,58 @@ class WebGPUNDArray implements IFaceNDArray {
     );
   }
 
+  get ndim(): number {
+    return this._tensor.shape.length;
+  }
+
+  get size(): number {
+    return this._tensor.shape.reduce((a: number, b: number) => a * b, 1);
+  }
+
+  get T(): IFaceNDArray {
+    const ndim = this._tensor.shape.length;
+    if (ndim <= 1) return this;
+    const shape = this.shape;
+    const perm = [...Array(ndim).keys()].reverse();
+    const newShape = perm.map(i => shape[i]);
+    const size = this.size;
+    const srcData = this.data; // may throw if not materialized
+    const data = new Float64Array(size);
+
+    const oldStrides = new Array(ndim);
+    oldStrides[ndim - 1] = 1;
+    for (let i = ndim - 2; i >= 0; i--) {
+      oldStrides[i] = oldStrides[i + 1] * shape[i + 1];
+    }
+    const newStrides = new Array(ndim);
+    newStrides[ndim - 1] = 1;
+    for (let i = ndim - 2; i >= 0; i--) {
+      newStrides[i] = newStrides[i + 1] * newShape[i + 1];
+    }
+
+    for (let newFlat = 0; newFlat < size; newFlat++) {
+      let remaining = newFlat;
+      let oldFlat = 0;
+      for (let d = 0; d < ndim; d++) {
+        const coord = Math.floor(remaining / newStrides[d]);
+        remaining -= coord * newStrides[d];
+        oldFlat += coord * oldStrides[perm[d]];
+      }
+      data[newFlat] = srcData[oldFlat];
+    }
+
+    return new LegacyWebGPUNDArray(data, newShape, this.dtype);
+  }
+
   toArray(): number[] {
     return Array.from(this.data);
+  }
+
+  item(): number {
+    if (this.size !== 1) {
+      throw new Error('can only convert an array of size 1 to a scalar');
+    }
+    return this.data[0];
   }
 
   get tensor(): WebGPUTensor {
@@ -295,8 +345,56 @@ class LegacyWebGPUNDArray implements IFaceNDArray {
     return this._data;
   }
 
+  get ndim(): number {
+    return this._shape.length;
+  }
+
+  get size(): number {
+    return this._shape.reduce((a, b) => a * b, 1);
+  }
+
+  get T(): IFaceNDArray {
+    const ndim = this._shape.length;
+    if (ndim <= 1) return this;
+    const perm = [...Array(ndim).keys()].reverse();
+    const newShape = perm.map(i => this._shape[i]);
+    const size = this._data.length;
+    const data = new Float64Array(size);
+
+    const oldStrides = new Array(ndim);
+    oldStrides[ndim - 1] = 1;
+    for (let i = ndim - 2; i >= 0; i--) {
+      oldStrides[i] = oldStrides[i + 1] * this._shape[i + 1];
+    }
+    const newStrides = new Array(ndim);
+    newStrides[ndim - 1] = 1;
+    for (let i = ndim - 2; i >= 0; i--) {
+      newStrides[i] = newStrides[i + 1] * newShape[i + 1];
+    }
+
+    for (let newFlat = 0; newFlat < size; newFlat++) {
+      let remaining = newFlat;
+      let oldFlat = 0;
+      for (let d = 0; d < ndim; d++) {
+        const coord = Math.floor(remaining / newStrides[d]);
+        remaining -= coord * newStrides[d];
+        oldFlat += coord * oldStrides[perm[d]];
+      }
+      data[newFlat] = this._data[oldFlat];
+    }
+
+    return new LegacyWebGPUNDArray(data, newShape, this.dtype);
+  }
+
   toArray(): number[] {
     return Array.from(this._data);
+  }
+
+  item(): number {
+    if (this._data.length !== 1) {
+      throw new Error('can only convert an array of size 1 to a scalar');
+    }
+    return this._data[0];
   }
 }
 
@@ -5786,6 +5884,13 @@ export class WebGPUBackend implements Backend {
   readonly device: GPUDevice;
   private bufferManager: BufferManager;
 
+  // ============ Constants ============
+  pi = Math.PI;
+  e = Math.E;
+  inf = Infinity;
+  nan = NaN;
+  newaxis = null as any;
+
   constructor(device: GPUDevice) {
     this.device = device;
     this.bufferManager = new BufferManager(device);
@@ -8901,7 +9006,7 @@ export class WebGPUBackend implements Backend {
     return arr;
   }
 
-  countNonzero(arr: IFaceNDArray, axis?: number): IFaceNDArray | number {
+  countNonzero(arr: IFaceNDArray, axis?: number, keepdims?: boolean): IFaceNDArray | number {
     if (axis === undefined) {
       let count = 0;
       for (let i = 0; i < arr.data.length; i++) {
@@ -8946,7 +9051,13 @@ export class WebGPUBackend implements Backend {
       result[outIdx] = count;
     }
 
-    return this.createArray(result, outShape);
+    const out = this.createArray(result, outShape);
+    if (keepdims) {
+      const newShape = [...arr.shape];
+      newShape[normalizedAxis] = 1;
+      return this.reshape(out, newShape);
+    }
+    return out;
   }
 
   // ============ Linear Algebra - Sync (CPU) ============
@@ -9910,7 +10021,20 @@ export class WebGPUBackend implements Backend {
     return this.matmul(aInv, bMat);
   }
 
-  norm(arr: IFaceNDArray, ord: number = 2, axis?: number): number | IFaceNDArray {
+  norm(arr: IFaceNDArray, ord: number | 'fro' | 'nuc' = 2, axis?: number): number | IFaceNDArray {
+    // Handle 'fro' (Frobenius norm) — sqrt of sum of squares
+    if (ord === 'fro') {
+      const data = arr.data;
+      let s = 0;
+      for (let i = 0; i < data.length; i++) s += data[i] * data[i];
+      return Math.sqrt(s);
+    }
+    if (ord === 'nuc') {
+      const { s } = this.svd(arr);
+      let sum = 0;
+      for (let i = 0; i < s.data.length; i++) sum += s.data[i];
+      return sum;
+    }
     if (axis !== undefined) {
       // Compute norm along the given axis (2D arrays only for now)
       if (arr.shape.length !== 2) throw new Error('norm with axis only supports 2D arrays');
@@ -13193,16 +13317,30 @@ ${productCode}
     return result;
   }
 
-  logspace(start: number, stop: number, num: number, base: number = 10): IFaceNDArray {
+  logspace(
+    start: number,
+    stop: number,
+    num: number,
+    base: number = 10,
+    endpoint: boolean = true,
+    dtype?: DType
+  ): IFaceNDArray {
     // GPU implementation: linspace then exp(x * ln(base))
-    const linear = this.linspace(start, stop, num);
+    const linear = this.linspace(start, stop, num, endpoint);
     const lnBase = Math.log(base);
     // Multiply by ln(base) then apply exp - equivalent to pow(base, x)
     const scaled = this.mulScalar(linear, lnBase);
-    return this.exp(scaled);
+    const result = this.exp(scaled);
+    return dtype ? this.astype(result, dtype) : result;
   }
 
-  geomspace(start: number, stop: number, num: number): IFaceNDArray {
+  geomspace(
+    start: number,
+    stop: number,
+    num: number,
+    endpoint: boolean = true,
+    dtype?: DType
+  ): IFaceNDArray {
     if (start === 0 || stop === 0) {
       throw new Error('geomspace: start and stop must be non-zero');
     }
@@ -13213,14 +13351,17 @@ ${productCode}
     // GPU implementation: linspace in log space then exp
     const logStart = Math.log(Math.abs(start));
     const logStop = Math.log(Math.abs(stop));
-    const linear = this.linspace(logStart, logStop, num);
+    const linear = this.linspace(logStart, logStop, num, endpoint);
     const expd = this.exp(linear);
 
     // If negative, negate all values
+    let result: IFaceNDArray;
     if (start < 0) {
-      return this.mulScalar(expd, -1);
+      result = this.mulScalar(expd, -1);
+    } else {
+      result = expd;
     }
-    return expd;
+    return dtype ? this.astype(result, dtype) : result;
   }
 
   // ============ Stacking Shortcuts ============
@@ -14842,13 +14983,19 @@ ${productCode}
     return this.createArray(result, resultShape);
   }
 
-  nansum(arr: IFaceNDArray, axis?: number): number | IFaceNDArray {
+  nansum(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let sum = 0;
         for (let i = 0; i < vals.length; i++) if (!Number.isNaN(vals[i])) sum += vals[i];
         return sum;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     let sum = 0;
     for (let i = 0; i < arr.data.length; i++) {
@@ -14857,9 +15004,9 @@ ${productCode}
     return sum;
   }
 
-  nanmean(arr: IFaceNDArray, axis?: number): number | IFaceNDArray {
+  nanmean(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let sum = 0,
           count = 0;
         for (let i = 0; i < vals.length; i++)
@@ -14869,6 +15016,12 @@ ${productCode}
           }
         return count > 0 ? sum / count : NaN;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     let sum = 0,
       count = 0;
@@ -14881,9 +15034,14 @@ ${productCode}
     return count > 0 ? sum / count : NaN;
   }
 
-  nanvar(arr: IFaceNDArray, axis?: number | null, ddof: number = 0): number | IFaceNDArray {
+  nanvar(
+    arr: IFaceNDArray,
+    axis?: number | null,
+    ddof: number = 0,
+    keepdims?: boolean
+  ): number | IFaceNDArray {
     if (axis !== undefined && axis !== null) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let sum = 0,
           count = 0;
         for (let i = 0; i < vals.length; i++)
@@ -14901,6 +15059,12 @@ ${productCode}
           }
         return count > ddof ? sumSq / (count - ddof) : NaN;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     const mean = this.nanmean(arr) as number;
     if (Number.isNaN(mean)) return NaN;
@@ -14916,22 +15080,39 @@ ${productCode}
     return count > ddof ? sumSq / (count - ddof) : NaN;
   }
 
-  nanstd(arr: IFaceNDArray, axis?: number | null, ddof: number = 0): number | IFaceNDArray {
+  nanstd(
+    arr: IFaceNDArray,
+    axis?: number | null,
+    ddof: number = 0,
+    keepdims?: boolean
+  ): number | IFaceNDArray {
     if (axis !== undefined && axis !== null) {
       const variance = this.nanvar(arr, axis, ddof) as IFaceNDArray;
-      return this.sqrt(variance);
+      const result = this.sqrt(variance);
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     return Math.sqrt(this.nanvar(arr, null, ddof) as number);
   }
 
-  nanmin(arr: IFaceNDArray, axis?: number): number | IFaceNDArray {
+  nanmin(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let min = Infinity;
         for (let i = 0; i < vals.length; i++)
           if (!Number.isNaN(vals[i]) && vals[i] < min) min = vals[i];
         return min === Infinity ? NaN : min;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     let min = Infinity;
     for (let i = 0; i < arr.data.length; i++) {
@@ -14940,14 +15121,20 @@ ${productCode}
     return min === Infinity ? NaN : min;
   }
 
-  nanmax(arr: IFaceNDArray, axis?: number): number | IFaceNDArray {
+  nanmax(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let max = -Infinity;
         for (let i = 0; i < vals.length; i++)
           if (!Number.isNaN(vals[i]) && vals[i] > max) max = vals[i];
         return max === -Infinity ? NaN : max;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     let max = -Infinity;
     for (let i = 0; i < arr.data.length; i++) {
@@ -15004,13 +15191,19 @@ ${productCode}
     return maxIdx;
   }
 
-  nanprod(arr: IFaceNDArray, axis?: number): number | IFaceNDArray {
+  nanprod(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let prod = 1;
         for (let i = 0; i < vals.length; i++) if (!Number.isNaN(vals[i])) prod *= vals[i];
         return prod;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     let prod = 1;
     for (let i = 0; i < arr.data.length; i++) {
@@ -15037,20 +15230,37 @@ ${productCode}
     return sorted[lo] * (1 - frac) + sorted[hi] * frac;
   }
 
-  median(arr: IFaceNDArray, axis?: number): number | IFaceNDArray {
+  median(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         const sorted = Array.from(vals).sort((a, b) => a - b);
         return WebGPUBackend._medianOfSorted(sorted);
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     const sorted = Array.from(arr.data).sort((a, b) => a - b);
     return WebGPUBackend._medianOfSorted(sorted);
   }
 
-  percentile(arr: IFaceNDArray, q: number, axis?: number): number | IFaceNDArray {
+  percentile(
+    arr: IFaceNDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean
+  ): number | IFaceNDArray {
     if (q < 0 || q > 100) throw new Error('percentile must be 0-100');
-    return this.quantile(arr, q / 100, axis);
+    const result = this.quantile(arr, q / 100, axis);
+    if (keepdims && axis !== undefined && typeof result !== 'number') {
+      const newShape = [...arr.shape];
+      newShape[axis] = 1;
+      return this.reshape(result, newShape);
+    }
+    return result;
   }
 
   quantile(arr: IFaceNDArray, q: number, axis?: number): number | IFaceNDArray {
@@ -15065,14 +15275,20 @@ ${productCode}
     return WebGPUBackend._quantileOfSorted(sorted, q);
   }
 
-  nanmedian(arr: IFaceNDArray, axis?: number): number | IFaceNDArray {
+  nanmedian(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         const sorted = Array.from(vals)
           .filter(x => !Number.isNaN(x))
           .sort((a, b) => a - b);
         return WebGPUBackend._medianOfSorted(sorted);
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     const nonNaN = Array.from(arr.data).filter(x => !Number.isNaN(x));
     if (nonNaN.length === 0) return NaN;
@@ -15080,15 +15296,26 @@ ${productCode}
     return WebGPUBackend._medianOfSorted(sorted);
   }
 
-  nanpercentile(arr: IFaceNDArray, q: number, axis?: number): number | IFaceNDArray {
+  nanpercentile(
+    arr: IFaceNDArray,
+    q: number,
+    axis?: number,
+    keepdims?: boolean
+  ): number | IFaceNDArray {
     if (q < 0 || q > 100) throw new Error('percentile must be 0-100');
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         const sorted = Array.from(vals)
           .filter(x => !Number.isNaN(x))
           .sort((a, b) => a - b);
         return WebGPUBackend._quantileOfSorted(sorted, q / 100);
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     const nonNaN = Array.from(arr.data).filter(x => !Number.isNaN(x));
     if (nonNaN.length === 0) return NaN;
@@ -16675,13 +16902,28 @@ ${productCode}
 
   // ============ Additional Stats ============
 
-  average(arr: IFaceNDArray, weights?: IFaceNDArray, axis?: number): number | IFaceNDArray {
+  average(
+    arr: IFaceNDArray,
+    weights?: IFaceNDArray,
+    axis?: number,
+    keepdims?: boolean
+  ): number | IFaceNDArray {
     if (axis !== undefined) {
-      if (!weights) return this.mean(arr, axis);
-      const weighted = this.multiply(arr, weights);
-      const sumWX = this.sum(weighted, axis) as IFaceNDArray;
-      const sumW = this.sum(weights, axis) as IFaceNDArray;
-      return this.divide(sumWX, sumW);
+      let result: IFaceNDArray;
+      if (!weights) {
+        result = this.mean(arr, axis) as IFaceNDArray;
+      } else {
+        const weighted = this.multiply(arr, weights);
+        const sumWX = this.sum(weighted, axis) as IFaceNDArray;
+        const sumW = this.sum(weights, axis) as IFaceNDArray;
+        result = this.divide(sumWX, sumW);
+      }
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     if (!weights) return this.mean(arr) as number;
     let sum = 0,
@@ -16693,13 +16935,19 @@ ${productCode}
     return sum / wSum;
   }
 
-  ptp(arr: IFaceNDArray, axis?: number): number | IFaceNDArray {
+  ptp(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
     if (axis === undefined) {
       return (this.max(arr) as number) - (this.min(arr) as number);
     }
     const maxArr = this.maxAxis(arr, axis);
     const minArr = this.minAxis(arr, axis);
-    return this.subtract(maxArr, minArr);
+    const result = this.subtract(maxArr, minArr);
+    if (keepdims) {
+      const newShape = [...arr.shape];
+      newShape[axis] = 1;
+      return this.reshape(result, newShape);
+    }
+    return result;
   }
 
   digitize(x: IFaceNDArray, bins: IFaceNDArray, right: boolean = false): IFaceNDArray {

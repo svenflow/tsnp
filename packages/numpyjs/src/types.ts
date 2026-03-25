@@ -77,12 +77,32 @@ export interface NDArray {
   shape: number[];
   dtype: DType;
   data: AnyTypedArray;
+  /** Number of dimensions (equivalent to shape.length) */
+  ndim: number;
+  /** Total number of elements */
+  size: number;
+  /** Transpose shortcut — returns the transposed array */
+  T: NDArray;
   toArray(): number[];
+  /** Extract scalar from 0-d or 1-element array; throws if more than 1 element */
+  item(): number;
 }
 
 /** Backend interface that all backends must implement */
 export interface Backend {
   name: string;
+
+  // ============ Constants ============
+  /** Math.PI */
+  pi: number;
+  /** Math.E */
+  e: number;
+  /** Infinity */
+  inf: number;
+  /** NaN */
+  nan: number;
+  /** null — used as axis expansion sentinel (np.newaxis) */
+  newaxis: null;
 
   // ============ Creation ============
   zeros(shape: number[], dtype?: DType): NDArray;
@@ -197,7 +217,7 @@ export interface Backend {
   atleast1d(arr: NDArray): NDArray;
   atleast2d(arr: NDArray): NDArray;
   atleast3d(arr: NDArray): NDArray;
-  countNonzero(arr: NDArray, axis?: number): NDArray | number;
+  countNonzero(arr: NDArray, axis?: number, keepdims?: boolean): NDArray | number;
 
   // ============ Advanced Linalg ============
   matrixPower(arr: NDArray, n: number): NDArray | Promise<NDArray>;
@@ -305,22 +325,22 @@ export interface Backend {
   cumprodAxis(arr: NDArray, axis: number): NDArray;
 
   // ============ NaN-aware Stats ============
-  nansum(arr: NDArray, axis?: number): number | NDArray;
-  nanmean(arr: NDArray, axis?: number): number | NDArray;
-  nanstd(arr: NDArray, axis?: number | null, ddof?: number): number | NDArray;
-  nanvar(arr: NDArray, axis?: number | null, ddof?: number): number | NDArray;
-  nanmin(arr: NDArray, axis?: number): number | NDArray;
-  nanmax(arr: NDArray, axis?: number): number | NDArray;
+  nansum(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
+  nanmean(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
+  nanstd(arr: NDArray, axis?: number | null, ddof?: number, keepdims?: boolean): number | NDArray;
+  nanvar(arr: NDArray, axis?: number | null, ddof?: number, keepdims?: boolean): number | NDArray;
+  nanmin(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
+  nanmax(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
   nanargmin(arr: NDArray, axis?: number): number | NDArray;
   nanargmax(arr: NDArray, axis?: number): number | NDArray;
-  nanprod(arr: NDArray, axis?: number): number | NDArray;
+  nanprod(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
 
   // ============ Order Statistics ============
-  median(arr: NDArray, axis?: number): number | NDArray;
-  percentile(arr: NDArray, q: number, axis?: number): number | NDArray;
+  median(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
+  percentile(arr: NDArray, q: number, axis?: number, keepdims?: boolean): number | NDArray;
   quantile(arr: NDArray, q: number, axis?: number): number | NDArray;
-  nanmedian(arr: NDArray, axis?: number): number | NDArray;
-  nanpercentile(arr: NDArray, q: number, axis?: number): number | NDArray;
+  nanmedian(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
+  nanpercentile(arr: NDArray, q: number, axis?: number, keepdims?: boolean): number | NDArray;
 
   // ============ Histogram ============
   histogram(
@@ -342,7 +362,7 @@ export interface Backend {
   det(arr: NDArray): number | Promise<number>;
   inv(arr: NDArray): NDArray | Promise<NDArray>;
   solve(a: NDArray, b: NDArray): NDArray | Promise<NDArray>;
-  norm(arr: NDArray, ord?: number, axis?: number): number | NDArray;
+  norm(arr: NDArray, ord?: number | 'fro' | 'nuc', axis?: number): number | NDArray;
   qr(arr: NDArray, mode?: 'reduced' | 'complete'): { q: NDArray; r: NDArray };
   svd(arr: NDArray, fullMatrices?: boolean): { u: NDArray; s: NDArray; vt: NDArray };
 
@@ -408,8 +428,15 @@ export interface Backend {
 
   // ============ Grid Creation ============
   meshgrid(...args: (NDArray | 'xy' | 'ij')[]): NDArray[];
-  logspace(start: number, stop: number, num: number, base?: number): NDArray;
-  geomspace(start: number, stop: number, num: number): NDArray;
+  logspace(
+    start: number,
+    stop: number,
+    num: number,
+    base?: number,
+    endpoint?: boolean,
+    dtype?: DType
+  ): NDArray;
+  geomspace(start: number, stop: number, num: number, endpoint?: boolean, dtype?: DType): NDArray;
 
   // ============ Stacking Shortcuts ============
   vstack(arrays: NDArray[]): NDArray;
@@ -552,8 +579,8 @@ export interface Backend {
   random(shape: number[]): NDArray;
 
   // ============ Additional Stats ============
-  average(arr: NDArray, weights?: NDArray, axis?: number): number | NDArray;
-  ptp(arr: NDArray, axis?: number): number | NDArray;
+  average(arr: NDArray, weights?: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
+  ptp(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray;
   digitize(x: NDArray, bins: NDArray, right?: boolean): NDArray;
   nanquantile(arr: NDArray, q: number, axis?: number): number | NDArray;
   nancumsum(arr: NDArray, axis?: number): NDArray;

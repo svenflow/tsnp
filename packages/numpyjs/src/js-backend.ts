@@ -37,8 +37,54 @@ class JsNDArray implements NDArray {
     return Array.from(this.data);
   }
 
+  get ndim(): number {
+    return this.shape.length;
+  }
+
   get size(): number {
     return this.shape.reduce((a, b) => a * b, 1);
+  }
+
+  get T(): NDArray {
+    const ndim = this.shape.length;
+    if (ndim <= 1) return this;
+    // Reverse axes for transpose
+    const perm = [...Array(ndim).keys()].reverse();
+    const newShape = perm.map(i => this.shape[i]);
+    const size = this.data.length;
+    const data = new Float64Array(size);
+
+    const oldStrides = new Array(ndim);
+    oldStrides[ndim - 1] = 1;
+    for (let i = ndim - 2; i >= 0; i--) {
+      oldStrides[i] = oldStrides[i + 1] * this.shape[i + 1];
+    }
+
+    const newStrides = new Array(ndim);
+    newStrides[ndim - 1] = 1;
+    for (let i = ndim - 2; i >= 0; i--) {
+      newStrides[i] = newStrides[i + 1] * newShape[i + 1];
+    }
+
+    for (let newFlat = 0; newFlat < size; newFlat++) {
+      let remaining = newFlat;
+      let oldFlat = 0;
+      for (let d = 0; d < ndim; d++) {
+        const coord = Math.floor(remaining / newStrides[d]);
+        remaining -= coord * newStrides[d];
+        oldFlat += coord * oldStrides[perm[d]];
+      }
+      data[newFlat] = this.data[oldFlat];
+    }
+
+    return new JsNDArray(data, newShape, this.dtype);
+  }
+
+  item(): number {
+    if (this.data.length !== 1) {
+      throw new Error('can only convert an array of size 1 to a scalar');
+    }
+    return this.data[0];
   }
 }
 
@@ -64,6 +110,13 @@ function flattenNestedArray(data: any): { flat: number[]; shape: number[] } {
 
 export class JsBackend implements Backend {
   name = 'js';
+
+  // ============ Constants ============
+  pi = Math.PI;
+  e = Math.E;
+  inf = Infinity;
+  nan = NaN;
+  newaxis = null as any;
 
   // ============ Creation ============
 
@@ -782,7 +835,7 @@ export class JsBackend implements Backend {
     return arr;
   }
 
-  countNonzero(arr: NDArray, axis?: number): NDArray | number {
+  countNonzero(arr: NDArray, axis?: number, keepdims?: boolean): NDArray | number {
     if (axis === undefined) {
       let count = 0;
       for (let i = 0; i < arr.data.length; i++) {
@@ -827,7 +880,13 @@ export class JsBackend implements Backend {
       result[outIdx] = count;
     }
 
-    return new JsNDArray(result, outShape);
+    const out = new JsNDArray(result, outShape);
+    if (keepdims) {
+      const newShape = [...arr.shape];
+      newShape[normalizedAxis] = 1;
+      return this.reshape(out, newShape);
+    }
+    return out;
   }
 
   // ============ Advanced Linalg ============
@@ -2381,7 +2440,21 @@ export class JsBackend implements Backend {
     return this.matmul(aInv, b);
   }
 
-  norm(arr: NDArray, ord: number = 2, axis?: number): number | NDArray {
+  norm(arr: NDArray, ord: number | 'fro' | 'nuc' = 2, axis?: number): number | NDArray {
+    // Handle 'fro' (Frobenius norm) — sqrt of sum of squares
+    if (ord === 'fro') {
+      const d = arr.data;
+      let s = 0;
+      for (let i = 0; i < d.length; i++) s += d[i] * d[i];
+      return Math.sqrt(s);
+    }
+    if (ord === 'nuc') {
+      // Nuclear norm: sum of singular values
+      const { s } = this.svd(arr);
+      let sum = 0;
+      for (let i = 0; i < s.data.length; i++) sum += s.data[i];
+      return sum;
+    }
     if (axis !== undefined) {
       // Compute norm along the given axis (2D arrays only for now)
       if (arr.shape.length !== 2) throw new Error('norm with axis only supports 2D arrays');
@@ -4057,16 +4130,29 @@ export class JsBackend implements Backend {
     return result;
   }
 
-  logspace(start: number, stop: number, num: number, base: number = 10): NDArray {
-    const linear = this.linspace(start, stop, num);
-    const result = new Float64Array(num);
+  logspace(
+    start: number,
+    stop: number,
+    num: number,
+    base: number = 10,
+    endpoint: boolean = true,
+    dtype: DType = 'float64'
+  ): NDArray {
+    const linear = this.linspace(start, stop, num, endpoint);
+    const result = createTypedArray(dtype, num);
     for (let i = 0; i < num; i++) {
       result[i] = Math.pow(base, linear.data[i]);
     }
-    return new JsNDArray(result, [num]);
+    return new JsNDArray(result, [num], dtype);
   }
 
-  geomspace(start: number, stop: number, num: number): NDArray {
+  geomspace(
+    start: number,
+    stop: number,
+    num: number,
+    endpoint: boolean = true,
+    dtype: DType = 'float64'
+  ): NDArray {
     if (start === 0 || stop === 0) {
       throw new Error('geomspace: start and stop must be non-zero');
     }
@@ -4076,15 +4162,15 @@ export class JsBackend implements Backend {
 
     const logStart = Math.log(Math.abs(start));
     const logStop = Math.log(Math.abs(stop));
-    const linear = this.linspace(logStart, logStop, num);
-    const result = new Float64Array(num);
+    const linear = this.linspace(logStart, logStop, num, endpoint);
+    const result = createTypedArray(dtype, num);
     const sign = start < 0 ? -1 : 1;
 
     for (let i = 0; i < num; i++) {
       result[i] = sign * Math.exp(linear.data[i]);
     }
 
-    return new JsNDArray(result, [num]);
+    return new JsNDArray(result, [num], dtype);
   }
 
   // ============ Stacking Shortcuts ============
@@ -4599,13 +4685,19 @@ export class JsBackend implements Backend {
     return new JsNDArray(result, resultShape);
   }
 
-  nansum(arr: NDArray, axis?: number): number | NDArray {
+  nansum(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let sum = 0;
         for (let i = 0; i < vals.length; i++) if (!Number.isNaN(vals[i])) sum += vals[i];
         return sum;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     let sum = 0;
     for (let i = 0; i < arr.data.length; i++) {
@@ -4614,9 +4706,9 @@ export class JsBackend implements Backend {
     return sum;
   }
 
-  nanmean(arr: NDArray, axis?: number): number | NDArray {
+  nanmean(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let sum = 0,
           count = 0;
         for (let i = 0; i < vals.length; i++)
@@ -4626,6 +4718,12 @@ export class JsBackend implements Backend {
           }
         return count > 0 ? sum / count : NaN;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     let sum = 0,
       count = 0;
@@ -4638,9 +4736,14 @@ export class JsBackend implements Backend {
     return count > 0 ? sum / count : NaN;
   }
 
-  nanvar(arr: NDArray, axis?: number | null, ddof: number = 0): number | NDArray {
+  nanvar(
+    arr: NDArray,
+    axis?: number | null,
+    ddof: number = 0,
+    keepdims?: boolean
+  ): number | NDArray {
     if (axis !== undefined && axis !== null) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let sum = 0,
           count = 0;
         for (let i = 0; i < vals.length; i++)
@@ -4658,6 +4761,12 @@ export class JsBackend implements Backend {
           }
         return count > ddof ? sumSq / (count - ddof) : NaN;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     const mean = this.nanmean(arr) as number;
     if (Number.isNaN(mean)) return NaN;
@@ -4673,22 +4782,39 @@ export class JsBackend implements Backend {
     return count > ddof ? sumSq / (count - ddof) : NaN;
   }
 
-  nanstd(arr: NDArray, axis?: number | null, ddof: number = 0): number | NDArray {
+  nanstd(
+    arr: NDArray,
+    axis?: number | null,
+    ddof: number = 0,
+    keepdims?: boolean
+  ): number | NDArray {
     if (axis !== undefined && axis !== null) {
       const variance = this.nanvar(arr, axis, ddof) as NDArray;
-      return this.sqrt(variance);
+      const result = this.sqrt(variance);
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     return Math.sqrt(this.nanvar(arr, null, ddof) as number);
   }
 
-  nanmin(arr: NDArray, axis?: number): number | NDArray {
+  nanmin(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let min = Infinity;
         for (let i = 0; i < vals.length; i++)
           if (!Number.isNaN(vals[i]) && vals[i] < min) min = vals[i];
         return min === Infinity ? NaN : min;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     let min = Infinity;
     for (let i = 0; i < arr.data.length; i++) {
@@ -4697,14 +4823,20 @@ export class JsBackend implements Backend {
     return min === Infinity ? NaN : min;
   }
 
-  nanmax(arr: NDArray, axis?: number): number | NDArray {
+  nanmax(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let max = -Infinity;
         for (let i = 0; i < vals.length; i++)
           if (!Number.isNaN(vals[i]) && vals[i] > max) max = vals[i];
         return max === -Infinity ? NaN : max;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     let max = -Infinity;
     for (let i = 0; i < arr.data.length; i++) {
@@ -4761,13 +4893,19 @@ export class JsBackend implements Backend {
     return maxIdx;
   }
 
-  nanprod(arr: NDArray, axis?: number): number | NDArray {
+  nanprod(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         let prod = 1;
         for (let i = 0; i < vals.length; i++) if (!Number.isNaN(vals[i])) prod *= vals[i];
         return prod;
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     let prod = 1;
     for (let i = 0; i < arr.data.length; i++) {
@@ -4804,20 +4942,32 @@ export class JsBackend implements Backend {
     return sorted[lo] * (1 - frac) + sorted[hi] * frac;
   }
 
-  median(arr: NDArray, axis?: number): number | NDArray {
+  median(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         const sorted = Array.from(vals).sort((a, b) => a - b);
         return JsBackend._medianOfSorted(sorted);
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     const sorted = this._sortedData(arr);
     return JsBackend._medianOfSorted(sorted);
   }
 
-  percentile(arr: NDArray, q: number, axis?: number): number | NDArray {
+  percentile(arr: NDArray, q: number, axis?: number, keepdims?: boolean): number | NDArray {
     if (q < 0 || q > 100) throw new Error('percentile must be 0-100');
-    return this.quantile(arr, q / 100, axis);
+    const result = this.quantile(arr, q / 100, axis);
+    if (keepdims && axis !== undefined && typeof result !== 'number') {
+      const newShape = [...arr.shape];
+      newShape[axis] = 1;
+      return this.reshape(result, newShape);
+    }
+    return result;
   }
 
   quantile(arr: NDArray, q: number, axis?: number): number | NDArray {
@@ -4832,28 +4982,40 @@ export class JsBackend implements Backend {
     return JsBackend._quantileOfSorted(sorted, q);
   }
 
-  nanmedian(arr: NDArray, axis?: number): number | NDArray {
+  nanmedian(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         const sorted = Array.from(vals)
           .filter(x => !Number.isNaN(x))
           .sort((a, b) => a - b);
         return JsBackend._medianOfSorted(sorted);
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     const sorted = this._sortedNonNaN(arr);
     return JsBackend._medianOfSorted(sorted);
   }
 
-  nanpercentile(arr: NDArray, q: number, axis?: number): number | NDArray {
+  nanpercentile(arr: NDArray, q: number, axis?: number, keepdims?: boolean): number | NDArray {
     if (q < 0 || q > 100) throw new Error('percentile must be 0-100');
     if (axis !== undefined) {
-      return this._reduceAlongAxis(arr, axis, vals => {
+      const result = this._reduceAlongAxis(arr, axis, vals => {
         const sorted = Array.from(vals)
           .filter(x => !Number.isNaN(x))
           .sort((a, b) => a - b);
         return JsBackend._quantileOfSorted(sorted, q / 100);
       });
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     const sorted = this._sortedNonNaN(arr);
     if (sorted.length === 0) return NaN;
@@ -6426,13 +6588,23 @@ export class JsBackend implements Backend {
 
   // ============ Additional Stats ============
 
-  average(arr: NDArray, weights?: NDArray, axis?: number): number | NDArray {
+  average(arr: NDArray, weights?: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
     if (axis !== undefined) {
-      if (!weights) return this.mean(arr, axis);
-      const weighted = this.multiply(arr, weights);
-      const sumWX = this.sum(weighted, axis) as NDArray;
-      const sumW = this.sum(weights, axis) as NDArray;
-      return this.divide(sumWX, sumW);
+      let result: NDArray;
+      if (!weights) {
+        result = this.mean(arr, axis) as NDArray;
+      } else {
+        const weighted = this.multiply(arr, weights);
+        const sumWX = this.sum(weighted, axis) as NDArray;
+        const sumW = this.sum(weights, axis) as NDArray;
+        result = this.divide(sumWX, sumW);
+      }
+      if (keepdims) {
+        const newShape = [...arr.shape];
+        newShape[axis] = 1;
+        return this.reshape(result, newShape);
+      }
+      return result;
     }
     if (!weights) return this.mean(arr) as number;
     if (arr.data.length !== weights.data.length)
@@ -6446,13 +6618,19 @@ export class JsBackend implements Backend {
     return sumWX / sumW;
   }
 
-  ptp(arr: NDArray, axis?: number): number | NDArray {
+  ptp(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
     if (axis === undefined) {
       return (this.max(arr) as number) - (this.min(arr) as number);
     }
     const maxArr = this.maxAxis(arr, axis);
     const minArr = this.minAxis(arr, axis);
-    return this.subtract(maxArr, minArr);
+    const result = this.subtract(maxArr, minArr);
+    if (keepdims) {
+      const newShape = [...arr.shape];
+      newShape[axis] = 1;
+      return this.reshape(result, newShape);
+    }
+    return result;
   }
 
   digitize(x: NDArray, bins: NDArray, right: boolean = false): NDArray {
