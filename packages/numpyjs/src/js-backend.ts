@@ -21,6 +21,17 @@ import {
   promoteDTypes,
 } from './types.js';
 
+function bankersRound(x: number): number {
+  if (!Number.isFinite(x)) return x;
+  const floor = Math.floor(x);
+  const frac = x - floor;
+  if (Math.abs(frac - 0.5) < Number.EPSILON * Math.max(1, Math.abs(x))) {
+    // Exactly halfway - round to even
+    return floor % 2 === 0 ? floor : floor + 1;
+  }
+  return Math.round(x);
+}
+
 class JsNDArray implements NDArray {
   data: AnyTypedArray;
   shape: number[];
@@ -417,12 +428,12 @@ export class JsBackend implements Backend {
 
   round(arr: NDArray, decimals: number = 0): NDArray {
     if (decimals === 0) {
-      return new JsNDArray(arr.data.map(Math.round), arr.shape);
+      return new JsNDArray(arr.data.map(bankersRound), arr.shape);
     }
     const factor = Math.pow(10, decimals);
     const data = new Float64Array(arr.data.length);
     for (let i = 0; i < data.length; i++) {
-      data[i] = Math.round(arr.data[i] * factor) / factor;
+      data[i] = bankersRound(arr.data[i] * factor) / factor;
     }
     return new JsNDArray(data, [...arr.shape]);
   }
@@ -1630,16 +1641,7 @@ export class JsBackend implements Backend {
 
     const result = new Float64Array(size).fill(defaultVal);
 
-    // Process conditions in reverse order (last condition has highest priority)
-    for (let c = condlist.length - 1; c >= 0; c--) {
-      for (let i = 0; i < size; i++) {
-        if (conditions[c].data[i] !== 0) {
-          result[i] = choices[c].data[i];
-        }
-      }
-    }
-
-    // Now process in forward order so first true condition wins
+    // Process in forward order so first true condition wins
     const selected = new Uint8Array(size);
     for (let c = 0; c < condlist.length; c++) {
       for (let i = 0; i < size; i++) {
@@ -1849,7 +1851,12 @@ export class JsBackend implements Backend {
       return result;
     }
     if (arr.data.length === 0) throw new Error('zero-size array');
-    return Math.min(...arr.data);
+    let m = Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (Number.isNaN(arr.data[i])) return NaN;
+      if (arr.data[i] < m) m = arr.data[i];
+    }
+    return m;
   }
 
   max(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
@@ -1863,7 +1870,12 @@ export class JsBackend implements Backend {
       return result;
     }
     if (arr.data.length === 0) throw new Error('zero-size array');
-    return Math.max(...arr.data);
+    let m = -Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (Number.isNaN(arr.data[i])) return NaN;
+      if (arr.data[i] > m) m = arr.data[i];
+    }
+    return m;
   }
 
   argmin(arr: NDArray, axis?: number, keepdims?: boolean): number | NDArray {
@@ -1913,7 +1925,7 @@ export class JsBackend implements Backend {
       sum += arr.data[i];
       data[i] = sum;
     }
-    const result = new JsNDArray(data, arr.shape);
+    const result = new JsNDArray(data, [arr.data.length]);
     return dtype ? this.astype(result, dtype) : result;
   }
 
@@ -1928,7 +1940,7 @@ export class JsBackend implements Backend {
       prod *= arr.data[i];
       data[i] = prod;
     }
-    const result = new JsNDArray(data, arr.shape);
+    const result = new JsNDArray(data, [arr.data.length]);
     return dtype ? this.astype(result, dtype) : result;
   }
 
@@ -2544,10 +2556,18 @@ export class JsBackend implements Backend {
       }
       return mn;
     }
-    // Default L2 norm
+    if (ord === 2) {
+      // Default L2 norm
+      let s = 0;
+      for (let i = 0; i < d.length; i++) s += d[i] * d[i];
+      return Math.sqrt(s);
+    }
+    // General numeric ord: ||x||_p = (sum(|x_i|^p))^(1/p)
     let s = 0;
-    for (let i = 0; i < d.length; i++) s += d[i] * d[i];
-    return Math.sqrt(s);
+    for (let i = 0; i < d.length; i++) {
+      s += Math.pow(Math.abs(d[i]), ord as number);
+    }
+    return Math.pow(s, 1 / (ord as number));
   }
 
   qr(arr: NDArray, mode: 'reduced' | 'complete' = 'reduced'): { q: NDArray; r: NDArray } {
@@ -7198,7 +7218,7 @@ export class JsBackend implements Backend {
   rint(arr: NDArray): NDArray {
     const data = new Float64Array(arr.data.length);
     for (let i = 0; i < data.length; i++) {
-      data[i] = Math.round(arr.data[i]);
+      data[i] = bankersRound(arr.data[i]);
     }
     return new JsNDArray(data, [...arr.shape]);
   }
@@ -7207,7 +7227,7 @@ export class JsBackend implements Backend {
     const factor = Math.pow(10, decimals);
     const data = new Float64Array(arr.data.length);
     for (let i = 0; i < data.length; i++) {
-      data[i] = Math.round(arr.data[i] * factor) / factor;
+      data[i] = bankersRound(arr.data[i] * factor) / factor;
     }
     return new JsNDArray(data, [...arr.shape]);
   }

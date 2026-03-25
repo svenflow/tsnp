@@ -16,6 +16,17 @@
  * - .data getter triggers async readback (via synchronous spinlock workaround)
  */
 
+function bankersRound(x: number): number {
+  if (!Number.isFinite(x)) return x;
+  const floor = Math.floor(x);
+  const frac = x - floor;
+  if (Math.abs(frac - 0.5) < Number.EPSILON * Math.max(1, Math.abs(x))) {
+    // Exactly halfway - round to even
+    return floor % 2 === 0 ? floor : floor + 1;
+  }
+  return Math.round(x);
+}
+
 import {
   Backend,
   NDArray as IFaceNDArray,
@@ -8045,7 +8056,7 @@ export class WebGPUBackend implements Backend {
     const factor = Math.pow(10, decimals);
     const data = new Float64Array(arr.data.length);
     for (let i = 0; i < data.length; i++) {
-      data[i] = Math.round(arr.data[i] * factor) / factor;
+      data[i] = bankersRound(arr.data[i] * factor) / factor;
     }
     return this.createArray(data, [...arr.shape]);
   }
@@ -8462,11 +8473,12 @@ export class WebGPUBackend implements Backend {
       return result;
     }
     if (arr.data.length === 0) throw new Error('zero-size array');
-    let min = arr.data[0];
-    for (let i = 1; i < arr.data.length; i++) {
-      if (arr.data[i] < min) min = arr.data[i];
+    let m = Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (Number.isNaN(arr.data[i])) return NaN;
+      if (arr.data[i] < m) m = arr.data[i];
     }
-    return min;
+    return m;
   }
 
   max(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
@@ -8480,11 +8492,12 @@ export class WebGPUBackend implements Backend {
       return result;
     }
     if (arr.data.length === 0) throw new Error('zero-size array');
-    let max = arr.data[0];
-    for (let i = 1; i < arr.data.length; i++) {
-      if (arr.data[i] > max) max = arr.data[i];
+    let m = -Infinity;
+    for (let i = 0; i < arr.data.length; i++) {
+      if (Number.isNaN(arr.data[i])) return NaN;
+      if (arr.data[i] > m) m = arr.data[i];
     }
-    return max;
+    return m;
   }
 
   argmin(arr: IFaceNDArray, axis?: number, keepdims?: boolean): number | IFaceNDArray {
@@ -8529,7 +8542,14 @@ export class WebGPUBackend implements Backend {
       return dtype ? this.astype(result, dtype) : result;
     }
     const tensor = this.toTensor(arr);
-    const result = this.fromTensor(this.runCumulativeOnTensor(tensor, 'cumsum'));
+    const resultTensor = this.runCumulativeOnTensor(tensor, 'cumsum');
+    // Flatten to 1D (NumPy returns flat when no axis given) - create tensor with flat shape
+    const flatTensor = new WebGPUTensor(
+      resultTensor.buffer,
+      [resultTensor.size],
+      resultTensor.device
+    );
+    const result = this.fromTensor(flatTensor);
     return dtype ? this.astype(result, dtype) : result;
   }
 
@@ -8539,7 +8559,13 @@ export class WebGPUBackend implements Backend {
       return dtype ? this.astype(result, dtype) : result;
     }
     const tensor = this.toTensor(arr);
-    const result = this.fromTensor(this.runCumulativeOnTensor(tensor, 'cumprod'));
+    const resultTensor = this.runCumulativeOnTensor(tensor, 'cumprod');
+    const flatTensor = new WebGPUTensor(
+      resultTensor.buffer,
+      [resultTensor.size],
+      resultTensor.device
+    );
+    const result = this.fromTensor(flatTensor);
     return dtype ? this.astype(result, dtype) : result;
   }
 
@@ -17489,7 +17515,7 @@ ${productCode}
 
   rint(arr: IFaceNDArray): IFaceNDArray {
     const data = new Float64Array(arr.data.length);
-    for (let i = 0; i < arr.data.length; i++) data[i] = Math.round(arr.data[i]);
+    for (let i = 0; i < arr.data.length; i++) data[i] = bankersRound(arr.data[i]);
     return this.createArray(data, [...arr.shape]);
   }
 
@@ -17497,7 +17523,7 @@ ${productCode}
     const factor = Math.pow(10, decimals);
     const data = new Float64Array(arr.data.length);
     for (let i = 0; i < arr.data.length; i++) {
-      data[i] = Math.round(arr.data[i] * factor) / factor;
+      data[i] = bankersRound(arr.data[i] * factor) / factor;
     }
     return this.createArray(data, [...arr.shape]);
   }
