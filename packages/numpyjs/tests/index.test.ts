@@ -20,6 +20,7 @@ import { numpyApiTests } from './numpy-api.test';
 import { dtypeScalarTests } from './dtype-scalar.test';
 import { parityTests } from './parity.test';
 import { coverageBoostTests } from './coverage-boost.test';
+import { coverageBoost2Tests } from './coverage-boost-2.test';
 
 import { createJsBackend } from '../src/js-backend';
 
@@ -44,4 +45,5 @@ describe('numpyjs js backend', () => {
   dtypeScalarTests(getBackend);
   parityTests(getBackend);
   coverageBoostTests(getBackend);
+  coverageBoost2Tests(getBackend);
 });
