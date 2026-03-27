@@ -42,3 +42,7 @@ __screenshots__/
 models/
 BlazePalm/
 docs/numpyjs/numpyjs.bundle.js
+
+# TLS certs
+*.crt
+*.key
