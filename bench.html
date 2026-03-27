@@ -74,7 +74,7 @@
       </thead>
       <tbody id="results"></tbody>
     </table>
-    <div class="note">WebGPU = GPU-resident f32 (no CPU readback). WASM = SIMD f32 (futex thread pool). tfjs WebGPU = kernel + await data(). tfjs WASM = XNNPACK multithreaded.</div>
+    <div class="note">WebGPU = GPU-resident f32 (no CPU readback). WASM = SIMD f32 (futex thread pool, or single-threaded fallback). tfjs WebGPU = kernel + await data(). tfjs WASM = XNNPACK multithreaded.</div>
   </div>
 
   <div class="card">
@@ -224,25 +224,48 @@ async function initWebGPU() {
 }
 
 // ============ WASM SIMD Init ============
+let wasmThreaded = false; // true = futex pool, false = single-threaded fallback
 async function initWasm() {
   try {
     const module = await import('./packages/numpyjs-wasm/crates/rumpy-wasm/pkg/rumpy_wasm.js');
-    await module.default();
-    // Initialize futex thread pool (same path as peak 62f9fe4 commit)
-    const numThreads = navigator.hardwareConcurrency || 4;
-    log(`WASM: initializing futex pool with ${numThreads} threads...`);
-    module.initFutexPool(numThreads);
-    // Poll until workers are ready
-    let waited = 0;
-    while (!module.futexWorkersReady()) {
-      await new Promise(r => setTimeout(r, 10));
-      waited += 10;
-      if (waited > 10000) throw new Error('futex pool init timed out after 10s');
+    const pkgBase = './packages/numpyjs-wasm/crates/rumpy-wasm/pkg/';
+    const fastWasm = pkgBase + 'rumpy_wasm_bg.wasm';
+    const compatWasm = pkgBase.replace('/pkg/', '/pkg-compat/') + 'rumpy_wasm_bg.wasm';
+
+    // Try fast binary (relaxed-simd FMA), fall back to compat (basic simd128)
+    let variant = 'relaxed-simd';
+    try {
+      await module.default(new URL(fastWasm, location.href));
+      log('WASM: loaded fast binary (relaxed-simd FMA)');
+    } catch (e) {
+      log('WASM: relaxed-simd not supported, trying compat binary...');
+      variant = 'simd128';
+      await module.default(new URL(compatWasm, location.href));
+      log('WASM: loaded compat binary (basic simd128)');
     }
-    const readyCount = module.futexWorkersReadyCount();
-    wasmModule = module;
-    log(`WASM SIMD initialized (${readyCount} futex workers)`);
-    initStatus('WASM SIMD', true, `${readyCount} futex workers, matmulF32Futex`);
+
+    // Try futex thread pool, fall back to single-threaded if it fails (e.g. iOS Safari)
+    try {
+      const numThreads = navigator.hardwareConcurrency || 4;
+      log(`WASM: initializing futex pool with ${numThreads} threads...`);
+      module.initFutexPool(numThreads);
+      let waited = 0;
+      while (!module.futexWorkersReady()) {
+        await new Promise(r => setTimeout(r, 10));
+        waited += 10;
+        if (waited > 10000) throw new Error('futex pool init timed out after 10s');
+      }
+      const readyCount = module.futexWorkersReadyCount();
+      wasmThreaded = true;
+      wasmModule = module;
+      log(`WASM SIMD initialized (${readyCount} futex workers, ${variant})`);
+      initStatus('WASM SIMD', true, `${readyCount} workers, ${variant}`);
+    } catch (e) {
+      log('WASM: futex pool failed (' + e.message + '), using single-threaded fallback');
+      wasmThreaded = false;
+      wasmModule = module;
+      initStatus('WASM SIMD', true, `single-threaded, ${variant} (no threading)`);
+    }
     return true;
   } catch (e) {
     log('WASM SIMD failed: ' + e.message);
@@ -376,8 +399,8 @@ function benchWasm(size, warmup = 3, runs = 10) {
     bData[i] = Math.random();
   }
 
-  // Use futex pool parallel matmul (same path as peak 62f9fe4 commit)
-  const matmul = wasmModule.matmulF32Futex;
+  // Use futex pool if available, else single-threaded SIMD
+  const matmul = wasmThreaded ? wasmModule.matmulF32Futex : wasmModule.matmulF32Optimized;
 
   // Warmup
   for (let i = 0; i < warmup; i++) {
@@ -485,7 +508,7 @@ function getSizes() {
     return params.get('sizes').split(',').map(Number);
   }
   const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
-  return isMobile ? [256, 512, 1024, 2048] : [256, 512, 1024, 2048, 4096];
+  return isMobile ? [256, 512, 1024] : [256, 512, 1024, 2048, 4096];
 }
 
 let tfjsReady = false;
@@ -501,10 +524,26 @@ window.runBenchmark = async function() {
   try {
     setStatus('Initializing backends...');
 
-    // Init all backends in parallel where possible
-    if (!device) await initWebGPU();
+    // Init all backends — gracefully handle missing WebGPU (e.g. mobile Safari)
+    let webgpuOk = false;
+    if (!device) {
+      try {
+        await initWebGPU();
+        webgpuOk = true;
+      } catch (e) {
+        log('WebGPU not available: ' + e.message);
+        initStatus('WebGPU', false, e.message);
+      }
+    } else {
+      webgpuOk = true;
+    }
     const wasmOk = await initWasm();
-    tfjsReady = await initTfjsWebGPU();
+    if (webgpuOk) {
+      tfjsReady = await initTfjsWebGPU();
+    } else {
+      log('tfjs WebGPU skipped (no WebGPU)');
+      initStatus('tfjs WebGPU', false, 'no WebGPU on this device');
+    }
     tfjsWasmReady = await initTfjsWasm();
 
     const sizes = getSizes();
@@ -516,11 +555,13 @@ window.runBenchmark = async function() {
 
       // numpyjs WebGPU
       let webgpu = null;
-      try {
-        webgpu = await benchWebGPU(size);
-        log(`  WebGPU:    ${webgpu.avgMs.toFixed(2)}ms = ${webgpu.gflops.toFixed(0)} GFLOPS`);
-      } catch (e) {
-        log(`  WebGPU:    FAILED - ${e.message}`);
+      if (webgpuOk) {
+        try {
+          webgpu = await benchWebGPU(size);
+          log(`  WebGPU:    ${webgpu.avgMs.toFixed(2)}ms = ${webgpu.gflops.toFixed(0)} GFLOPS`);
+        } catch (e) {
+          log(`  WebGPU:    FAILED - ${e.message}`);
+        }
       }
 
       // WASM SIMD (multi-threaded)

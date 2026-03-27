@@ -200,23 +200,47 @@ async function initWebGPU() {
   initStatus('WebGPU', true, desc);
 }
 
+let wasmThreaded = false;
 async function initWasm() {
   try {
     const module = await import('./packages/numpyjs-wasm/crates/rumpy-wasm/pkg/rumpy_wasm.js');
-    await module.default();
-    const numThreads = navigator.hardwareConcurrency || 4;
-    log(`WASM: initializing futex pool with ${numThreads} threads...`);
-    module.initFutexPool(numThreads);
-    let waited = 0;
-    while (!module.futexWorkersReady()) {
-      await new Promise(r => setTimeout(r, 10));
-      waited += 10;
-      if (waited > 10000) throw new Error('futex pool init timed out');
+    const pkgBase = './packages/numpyjs-wasm/crates/rumpy-wasm/pkg/';
+    const fastWasm = pkgBase + 'rumpy_wasm_bg.wasm';
+    const compatWasm = pkgBase.replace('/pkg/', '/pkg-compat/') + 'rumpy_wasm_bg.wasm';
+
+    let variant = 'relaxed-simd';
+    try {
+      await module.default(new URL(fastWasm, location.href));
+      log('WASM: loaded fast binary (relaxed-simd FMA)');
+    } catch (e) {
+      log('WASM: relaxed-simd not supported, trying compat...');
+      variant = 'simd128';
+      await module.default(new URL(compatWasm, location.href));
+      log('WASM: loaded compat binary (basic simd128)');
     }
-    const readyCount = module.futexWorkersReadyCount();
-    wasmModule = module;
-    log(`WASM SIMD initialized (${readyCount} futex workers)`);
-    initStatus('WASM SIMD', true, `${readyCount} futex workers`);
+
+    // Try futex thread pool, fall back to single-threaded if it fails (e.g. iOS Safari)
+    try {
+      const numThreads = navigator.hardwareConcurrency || 4;
+      log(`WASM: initializing futex pool with ${numThreads} threads...`);
+      module.initFutexPool(numThreads);
+      let waited = 0;
+      while (!module.futexWorkersReady()) {
+        await new Promise(r => setTimeout(r, 10));
+        waited += 10;
+        if (waited > 10000) throw new Error('futex pool init timed out');
+      }
+      const readyCount = module.futexWorkersReadyCount();
+      wasmThreaded = true;
+      wasmModule = module;
+      log(`WASM SIMD initialized (${readyCount} futex workers, ${variant})`);
+      initStatus('WASM SIMD', true, `${readyCount} workers, ${variant}`);
+    } catch (e) {
+      log('WASM: futex pool failed (' + e.message + '), using single-threaded fallback');
+      wasmThreaded = false;
+      wasmModule = module;
+      initStatus('WASM SIMD', true, `single-threaded, ${variant} (no threading)`);
+    }
     return true;
   } catch (e) {
     log('WASM SIMD failed: ' + e.message);
@@ -317,11 +341,12 @@ function benchWasm(size, warmup = 3, runs = 10) {
   const n = size;
   const aData = new Float32Array(n * n).map(() => Math.random());
   const bData = new Float32Array(n * n).map(() => Math.random());
-  for (let i = 0; i < warmup; i++) wasmModule.matmulF32Futex(aData, bData, n, n, n);
+  const matmul = wasmThreaded ? wasmModule.matmulF32Futex : wasmModule.matmulF32Optimized;
+  for (let i = 0; i < warmup; i++) matmul(aData, bData, n, n, n);
   const times = [];
   for (let i = 0; i < runs; i++) {
     const start = performance.now();
-    wasmModule.matmulF32Futex(aData, bData, n, n, n);
+    matmul(aData, bData, n, n, n);
     times.push(performance.now() - start);
   }
   const avg = times.reduce((a, b) => a + b) / times.length;
@@ -408,6 +433,7 @@ function getSizes() {
   if (params.has('sizes')) return params.get('sizes').split(',').map(Number);
   const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
   return isMobile ? [256, 512, 1024] : [256, 512, 1024, 2048, 4096];
+  // Mobile: smaller sizes since no GPU and WASM is slower
 }
 
 let tfjsGpuReady = false;
@@ -422,9 +448,14 @@ window.runBenchmark = async function() {
 
   try {
     setStatus('Initializing backends...');
-    if (!device) await initWebGPU();
+    let webgpuOk = false;
+    if (!device) {
+      try { await initWebGPU(); webgpuOk = true; }
+      catch (e) { log('WebGPU not available: ' + e.message); initStatus('WebGPU', false, e.message); }
+    } else { webgpuOk = true; }
     const wasmOk = await initWasm();
-    tfjsGpuReady = await initTfjsWebGPU();
+    if (webgpuOk) { tfjsGpuReady = await initTfjsWebGPU(); }
+    else { log('tfjs WebGPU skipped (no WebGPU)'); initStatus('tfjs WebGPU', false, 'no WebGPU'); }
     tfjsWasmReady = await initTfjsWasm();
 
     const sizes = getSizes();
@@ -437,8 +468,10 @@ window.runBenchmark = async function() {
 
       // 1. numpyjs WebGPU
       let webgpu = null;
-      try { webgpu = await benchWebGPU(size); log(`  numpyjs WebGPU:  ${webgpu.avgMs.toFixed(2)}ms = ${webgpu.gflops.toFixed(0)} GFLOPS`); }
-      catch (e) { log(`  numpyjs WebGPU:  FAILED - ${e.message}`); }
+      if (webgpuOk) {
+        try { webgpu = await benchWebGPU(size); log(`  numpyjs WebGPU:  ${webgpu.avgMs.toFixed(2)}ms = ${webgpu.gflops.toFixed(0)} GFLOPS`); }
+        catch (e) { log(`  numpyjs WebGPU:  FAILED - ${e.message}`); }
+      }
 
       // 2. numpyjs WASM
       let wasm = null;
