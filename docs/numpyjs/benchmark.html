@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GEMM Benchmark — numpyjs vs TensorFlow.js</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'SF Mono', 'Consolas', monospace; background: #1e1e2e; color: #cdd6f4; padding: 2rem; font-size: 14px; }
+h1 { font-size: 1.2rem; color: #89b4fa; margin-bottom: 0.5rem; }
+.subtitle { color: #6c7086; margin-bottom: 1.5rem; }
+#status { color: #a6e3a1; margin-bottom: 1rem; white-space: pre-wrap; }
+table { width: 100%; border-collapse: collapse; margin-top: 1rem; margin-bottom: 2rem; }
+th { text-align: left; padding: 0.4rem 0.8rem; border-bottom: 1px solid #45475a; color: #89b4fa; font-weight: 500; }
+td { padding: 0.4rem 0.8rem; border-bottom: 1px solid #313244; }
+.fastest { color: #a6e3a1; font-weight: 600; }
+.error { color: #f38ba8; font-style: italic; }
+.section-header { color: #cba6f7; font-weight: 600; font-size: 1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+button { background: #89b4fa; color: #1e1e2e; border: none; padding: 0.5rem 1.5rem; font-family: inherit; font-size: 14px; cursor: pointer; margin-bottom: 1rem; margin-right: 0.5rem; }
+button:hover { background: #74c7ec; }
+button:disabled { opacity: 0.4; cursor: default; }
+#json-output { margin-top: 1rem; background: #181825; padding: 1rem; font-size: 12px; max-height: 400px; overflow: auto; white-space: pre-wrap; display: none; }
+</style>
+</head>
+<body>
+<h1>GEMM Benchmark: numpyjs vs TensorFlow.js</h1>
+<div class="subtitle">Matrix multiplication (C = A × B) — square matrices, float32 — one backend at a time (no context switching)</div>
+<button id="run-btn" onclick="runBenchmarks()">Run Benchmarks</button>
+<button onclick="document.getElementById('json-output').style.display='block'">Show JSON</button>
+<div id="status">Ready. Click "Run Benchmarks" to start.</div>
+<div id="output"></div>
+<div id="json-output"></div>
+
+<script type="module">
+const CPU_SIZES = [32, 64, 128, 256, 512, 1024];
+const GPU_SIZES = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
+const WARMUP = 1;
+const ITERS = 3;
+
+const statusEl = document.getElementById('status');
+const outputEl = document.getElementById('output');
+const jsonOut = document.getElementById('json-output');
+const allResults = [];
+
+function log(msg) { statusEl.textContent = msg; }
+function yield_() { return new Promise(r => setTimeout(r, 10)); }
+
+function gflops(n, ms) {
+  return (2 * n * n * n) / (ms / 1000) / 1e9;
+}
+
+async function benchNumpyjs(np, n, iters) {
+  await yield_();
+  const a = np.randn([n, n]);
+  const b = np.randn([n, n]);
+  for (let i = 0; i < WARMUP; i++) { np.matmul(a, b); await yield_(); }
+  const times = [];
+  for (let i = 0; i < iters; i++) {
+    await yield_();
+    const t0 = performance.now();
+    np.matmul(a, b);
+    const t1 = performance.now();
+    times.push(t1 - t0);
+  }
+  return times.sort((a, b) => a - b)[Math.floor(times.length / 2)];
+}
+
+async function benchTfjs(tf, n, iters) {
+  await yield_();
+  const a = tf.randomNormal([n, n]);
+  const b = tf.randomNormal([n, n]);
+  for (let i = 0; i < WARMUP; i++) {
+    const r = tf.matMul(a, b); await r.data(); r.dispose(); await yield_();
+  }
+  const times = [];
+  for (let i = 0; i < iters; i++) {
+    await yield_();
+    const t0 = performance.now();
+    const r = tf.matMul(a, b);
+    await r.data();
+    const t1 = performance.now();
+    r.dispose();
+    times.push(t1 - t0);
+  }
+  a.dispose(); b.dispose();
+  return times.sort((a, b) => a - b)[Math.floor(times.length / 2)];
+}
+
+function renderTable(label, results) {
+  const h = document.createElement('div');
+  h.className = 'section-header';
+  h.textContent = label;
+  outputEl.appendChild(h);
+
+  const table = document.createElement('table');
+  table.innerHTML = `<thead><tr><th>Size</th><th>Time (ms)</th><th>GFLOPS</th></tr></thead>`;
+  const tb = document.createElement('tbody');
+  for (const r of results) {
+    const tr = document.createElement('tr');
+    if (r.error) {
+      tr.innerHTML = `<td>${r.size}×${r.size}</td><td class="error" colspan="2">${r.error}</td>`;
+    } else {
+      tr.innerHTML = `<td>${r.size}×${r.size}</td><td>${r.ms.toFixed(1)}</td><td>${r.gflops.toFixed(2)}</td>`;
+    }
+    tb.appendChild(tr);
+  }
+  table.appendChild(tb);
+  outputEl.appendChild(table);
+}
+
+window.runBenchmarks = async function() {
+  document.getElementById('run-btn').disabled = true;
+  outputEl.innerHTML = '';
+  allResults.length = 0;
+
+  // Load libs
+  log('Loading numpyjs...');
+  const npMod = await import('./numpyjs.bundle.js');
+  log('Loading TensorFlow.js...');
+  await import('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js');
+  const tf = window.tf;
+
+  // ── numpyjs JS ──
+  try {
+    log('Initializing numpyjs JS...');
+    const np = await npMod.createBackend('js');
+    const results = [];
+    for (const n of CPU_SIZES) {
+      log(`numpyjs JS ${n}×${n}...`);
+      try {
+        const ms = await benchNumpyjs(np, n, ITERS);
+        const r = { library: 'numpyjs', backend: 'js', size: n, ms, gflops: gflops(n, ms) };
+        results.push(r); allResults.push(r);
+      } catch(e) { results.push({ size: n, error: e.message }); }
+    }
+    renderTable('numpyjs — JS (CPU)', results);
+  } catch(e) { log('numpyjs JS failed: ' + e.message); }
+
+  // ── numpyjs WASM ──
+  try {
+    log('Initializing numpyjs WASM...');
+    const np = await npMod.createBackend('wasm');
+    const results = [];
+    for (const n of CPU_SIZES) {
+      log(`numpyjs WASM ${n}×${n}...`);
+      try {
+        const ms = await benchNumpyjs(np, n, ITERS);
+        const r = { library: 'numpyjs', backend: 'wasm', size: n, ms, gflops: gflops(n, ms) };
+        results.push(r); allResults.push(r);
+      } catch(e) { results.push({ size: n, error: e.message }); }
+    }
+    renderTable('numpyjs — WASM (CPU)', results);
+  } catch(e) { log('numpyjs WASM init failed: ' + e.message); }
+
+  // ── numpyjs WebGPU ──
+  try {
+    log('Initializing numpyjs WebGPU...');
+    const np = await npMod.createBackend('webgpu');
+    const results = [];
+    for (const n of GPU_SIZES) {
+      if (n > 1024) break; // too slow beyond 1024
+      log(`numpyjs WebGPU ${n}×${n}...`);
+      try {
+        const ms = await benchNumpyjs(np, n, ITERS);
+        const r = { library: 'numpyjs', backend: 'webgpu', size: n, ms, gflops: gflops(n, ms) };
+        results.push(r); allResults.push(r);
+      } catch(e) { results.push({ size: n, error: e.message }); }
+    }
+    renderTable('numpyjs — WebGPU', results);
+  } catch(e) { log('numpyjs WebGPU init failed: ' + e.message); }
+
+  // ── TF.js CPU ──
+  try {
+    log('Initializing TF.js CPU...');
+    await tf.setBackend('cpu');
+    await tf.ready();
+    const results = [];
+    for (const n of CPU_SIZES) {
+      log(`TF.js CPU ${n}×${n}...`);
+      try {
+        const ms = await benchTfjs(tf, n, ITERS);
+        const r = { library: 'tfjs', backend: 'cpu', size: n, ms, gflops: gflops(n, ms) };
+        results.push(r); allResults.push(r);
+      } catch(e) { results.push({ size: n, error: e.message }); }
+    }
+    renderTable('TensorFlow.js — CPU', results);
+  } catch(e) { log('TF.js CPU failed: ' + e.message); }
+
+  // ── TF.js WebGL ──
+  try {
+    log('Initializing TF.js WebGL...');
+    await tf.setBackend('webgl');
+    await tf.ready();
+    const results = [];
+    for (const n of GPU_SIZES) {
+      log(`TF.js WebGL ${n}×${n}...`);
+      try {
+        const iters = n >= 4096 ? 1 : ITERS;
+        const ms = await benchTfjs(tf, n, iters);
+        const r = { library: 'tfjs', backend: 'webgl', size: n, ms, gflops: gflops(n, ms) };
+        results.push(r); allResults.push(r);
+      } catch(e) { results.push({ size: n, error: e.message }); }
+    }
+    renderTable('TensorFlow.js — WebGL', results);
+  } catch(e) { log('TF.js WebGL failed: ' + e.message); }
+
+  // ── TF.js WebGPU ──
+  try {
+    log('Initializing TF.js WebGPU...');
+    await tf.setBackend('webgpu');
+    await tf.ready();
+    const results = [];
+    for (const n of GPU_SIZES) {
+      log(`TF.js WebGPU ${n}×${n}...`);
+      try {
+        const iters = n >= 4096 ? 1 : ITERS;
+        const ms = await benchTfjs(tf, n, iters);
+        const r = { library: 'tfjs', backend: 'webgpu', size: n, ms, gflops: gflops(n, ms) };
+        results.push(r); allResults.push(r);
+      } catch(e) { results.push({ size: n, error: e.message }); }
+    }
+    renderTable('TensorFlow.js — WebGPU', results);
+  } catch(e) { log('TF.js WebGPU init failed: ' + e.message); }
+
+  // ── Summary table ──
+  const h = document.createElement('div');
+  h.className = 'section-header';
+  h.textContent = 'Summary — Best GFLOPS per Backend';
+  outputEl.appendChild(h);
+
+  const byBackend = {};
+  for (const r of allResults) {
+    const key = `${r.library} ${r.backend}`;
+    if (!byBackend[key] || r.gflops > byBackend[key].gflops) byBackend[key] = r;
+  }
+  const sumTable = document.createElement('table');
+  sumTable.innerHTML = `<thead><tr><th>Backend</th><th>Best Size</th><th>Time (ms)</th><th>Peak GFLOPS</th></tr></thead>`;
+  const stb = document.createElement('tbody');
+  const sorted = Object.entries(byBackend).sort((a, b) => b[1].gflops - a[1].gflops);
+  for (const [key, r] of sorted) {
+    const tr = document.createElement('tr');
+    const isBest = r === sorted[0][1];
+    tr.innerHTML = `<td>${key}</td><td>${r.size}×${r.size}</td>
+      <td class="${isBest ? 'fastest' : ''}">${r.ms.toFixed(1)}</td>
+      <td class="${isBest ? 'fastest' : ''}">${r.gflops.toFixed(2)}</td>`;
+    stb.appendChild(tr);
+  }
+  sumTable.appendChild(stb);
+  outputEl.appendChild(sumTable);
+
+  log('Done! ' + allResults.length + ' benchmarks completed.');
+  jsonOut.textContent = JSON.stringify(allResults, null, 2);
+  document.getElementById('run-btn').disabled = false;
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>torchjs Section Profiler</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 1200px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #1a1a1a;
+      color: #e0e0e0;
+    }
+    h1, h2 { color: #fff; }
+    .section {
+      background: #2a2a2a;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+    pre {
+      background: #333;
+      padding: 15px;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 12px;
+      max-height: 600px;
+      white-space: pre-wrap;
+    }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      font-size: 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    button:disabled {
+      background: #666;
+      cursor: not-allowed;
+    }
+    button:hover:not(:disabled) {
+      background: #45a049;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 15px;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 10px 12px;
+      text-align: left;
+      border-bottom: 1px solid #444;
+    }
+    th { background: #333; }
+    .bar {
+      background: linear-gradient(90deg, #4CAF50 0%, #8BC34A 100%);
+      height: 20px;
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+    .bar-container {
+      background: #333;
+      width: 300px;
+      border-radius: 3px;
+    }
+    .highlight { background: #3a3a3a; }
+    tr:hover { background: #3a3a3a; }
+  </style>
+</head>
+<body>
+  <h1>📊 torchjs Section Profiler</h1>
+  <p>Profiles GPU time by model section using forced sync between stages.</p>
+
+  <div class="section">
+    <h2>Controls</h2>
+    <button id="runProfile">Run Section Profile</button>
+    <button id="runCompare">Run vs MediaPipe</button>
+  </div>
+
+  <div class="section">
+    <h2>Section Breakdown</h2>
+    <table id="results-table">
+      <thead>
+        <tr>
+          <th>Section</th>
+          <th>GPU Time (ms)</th>
+          <th>% of Total</th>
+          <th>Visual</th>
+        </tr>
+      </thead>
+      <tbody id="results-tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Console</h2>
+    <pre id="console"></pre>
+  </div>
+
+  <script type="module">
+    const consoleEl = document.getElementById('console');
+    const tbodyEl = document.getElementById('results-tbody');
+
+    function log(msg) {
+      consoleEl.textContent += msg + '\n';
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+      console.log(msg);
+    }
+
+    function clearLog() {
+      consoleEl.textContent = '';
+      tbodyEl.innerHTML = '';
+    }
+
+    function addResult(name, timeMs, totalMs) {
+      const pct = (timeMs / totalMs * 100).toFixed(1);
+      const barWidth = Math.min(300, Math.max(2, timeMs / totalMs * 300));
+
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${name}</td>
+        <td>${timeMs.toFixed(2)}</td>
+        <td>${pct}%</td>
+        <td><div class="bar-container"><div class="bar" style="width: ${barWidth}px"></div></div></td>
+      `;
+      if (parseFloat(pct) > 15) row.classList.add('highlight');
+      tbodyEl.appendChild(row);
+    }
+
+    // ============ Profiled HandLandmarks Implementation ============
+    // This is a copy of handLandmarks with sync points inserted
+
+    async function profiledHandLandmarks(testInput, weights, torchjs, device) {
+      const nn = torchjs.nn;
+      const sections = [];
+
+      function extractResModuleWeights(stateDict, prefix) {
+        return {
+          'convs.0.weight': stateDict[`${prefix}convs.0.weight`],
+          'convs.0.bias': stateDict[`${prefix}convs.0.bias`],
+          'convs.1.weight': stateDict[`${prefix}convs.1.weight`],
+          'convs.1.bias': stateDict[`${prefix}convs.1.bias`],
+        };
+      }
+
+      function extractResBlockWeights(stateDict, prefix, numModules) {
+        const w = {};
+        for (let i = 0; i < numModules; i++) {
+          const keys = [
+            `f.${i}.convs.0.weight`, `f.${i}.convs.0.bias`,
+            `f.${i}.convs.1.weight`, `f.${i}.convs.1.bias`,
+          ];
+          for (const key of keys) {
+            w[key] = stateDict[`${prefix}${key}`];
+          }
+        }
+        return w;
+      }
+
+      function resModule(x, w, stride, channelPad) {
+        let h, skip;
+        if (stride === 2) {
+          h = nn.pad(x, [1, 2, 1, 2], 'constant', 0);
+          skip = nn.maxPool2d(x, [2, 2], [2, 2], [0, 0]);
+        } else {
+          h = x;
+          skip = x;
+        }
+        if (channelPad > 0) {
+          skip = nn.pad(skip, [0, 0, 0, 0, 0, channelPad], 'constant', 0);
+        }
+        const padding = stride === 1 ? [2, 2] : [0, 0];
+        const dw = nn.depthwiseConv2d(h, w['convs.0.weight'], w['convs.0.bias'], [stride, stride], padding);
+        const pw = nn.conv2d(dw, w['convs.1.weight'], w['convs.1.bias'], [1, 1], [0, 0]);
+        return nn.addRelu(pw, skip);
+      }
+
+      function resBlock(x, w, numModules) {
+        let out = x;
+        for (let i = 0; i < numModules; i++) {
+          const prefix = `f.${i}.`;
+          const mw = {
+            'convs.0.weight': w[`${prefix}convs.0.weight`],
+            'convs.0.bias': w[`${prefix}convs.0.bias`],
+            'convs.1.weight': w[`${prefix}convs.1.weight`],
+            'convs.1.bias': w[`${prefix}convs.1.bias`],
+          };
+          out = resModule(out, mw, 1, 0);
+        }
+        return out;
+      }
+
+      async function syncAndTime(name, fn) {
+        const t0 = performance.now();
+        const result = fn();
+        await device.queue.onSubmittedWorkDone();
+        const t1 = performance.now();
+        sections.push({ name, time: t1 - t0 });
+        return result;
+      }
+
+      let x = testInput;
+
+      // ============ Backbone 1 ============
+      let b1 = await syncAndTime('backbone1_pad', () => nn.pad(x, [0, 1, 0, 1], 'constant', 0));
+      b1 = await syncAndTime('backbone1_conv3x3', () => nn.conv2d(b1, weights['backbone1.1.weight'], weights['backbone1.1.bias'], [2, 2], [0, 0]));
+      b1 = await syncAndTime('backbone1_relu', () => nn.relu(b1));
+      b1 = await syncAndTime('backbone1_resblock', () => resBlock(b1, extractResBlockWeights(weights, 'backbone1.3.', 2), 2));
+      b1 = await syncAndTime('backbone1_resmodule', () => resModule(b1, extractResModuleWeights(weights, 'backbone1.4.'), 2, 24));
+
+      // ============ Backbone 2 ============
+      let b2 = await syncAndTime('backbone2_resblock', () => resBlock(b1, extractResBlockWeights(weights, 'backbone2.0.', 2), 2));
+      b2 = await syncAndTime('backbone2_resmodule', () => resModule(b2, extractResModuleWeights(weights, 'backbone2.1.'), 2, 48));
+
+      // ============ Backbone 3 ============
+      let b3 = await syncAndTime('backbone3_resblock', () => resBlock(b2, extractResBlockWeights(weights, 'backbone3.0.', 2), 2));
+      b3 = await syncAndTime('backbone3_resmodule', () => resModule(b3, extractResModuleWeights(weights, 'backbone3.1.'), 2, 0));
+
+      // ============ Backbone 4 ============
+      let b4 = await syncAndTime('backbone4_resblock', () => resBlock(b3, extractResBlockWeights(weights, 'backbone4.0.', 2), 2));
+      b4 = await syncAndTime('backbone4_resmodule', () => resModule(b4, extractResModuleWeights(weights, 'backbone4.1.'), 2, 0));
+      b4 = await syncAndTime('backbone4_upsample', () => nn.upsampleBilinear(b4, 2));
+      b4 = await syncAndTime('backbone4_add', () => nn.add(b4, b3));
+
+      // ============ Backbone 5 ============
+      let b5 = await syncAndTime('backbone5_resmodule', () => resModule(b4, extractResModuleWeights(weights, 'backbone5.0.'), 1, 0));
+      b5 = await syncAndTime('backbone5_upsample', () => nn.upsampleBilinear(b5, 2));
+      b5 = await syncAndTime('backbone5_add', () => nn.add(b5, b2));
+
+      // ============ Backbone 6 ============
+      let b6 = await syncAndTime('backbone6_resmodule', () => resModule(b5, extractResModuleWeights(weights, 'backbone6.0.'), 1, 0));
+      b6 = await syncAndTime('backbone6_conv1x1', () => nn.conv2d(b6, weights['backbone6.1.weight'], weights['backbone6.1.bias'], [1, 1], [0, 0]));
+      b6 = await syncAndTime('backbone6_upsample', () => nn.upsampleBilinear(b6, 2));
+      b6 = await syncAndTime('backbone6_add', () => nn.add(b6, b1));
+
+      // ============ FF Layers ============
+      const ResBlockChannels = [48, 96, 288, 288, 288];
+      const ResModuleChannels = [96, 288, 288, 288, 288];
+      let ff = b6;
+      let ffIdx = 0;
+
+      for (let stage = 0; stage < 5; stage++) {
+        const inCh = ResBlockChannels[stage];
+        const outCh = ResModuleChannels[stage];
+        ff = await syncAndTime(`ff_stage${stage}_resblock`, () => resBlock(ff, extractResBlockWeights(weights, `ff.${ffIdx}.`, 4), 4));
+        ffIdx++;
+        ff = await syncAndTime(`ff_stage${stage}_resmodule`, () => resModule(ff, extractResModuleWeights(weights, `ff.${ffIdx}.`), 2, outCh - inCh));
+        ffIdx++;
+      }
+      ff = await syncAndTime('ff_final_resblock', () => resBlock(ff, extractResBlockWeights(weights, `ff.${ffIdx}.`, 4), 4));
+
+      // ============ Output Heads ============
+      let handflag = await syncAndTime('head_handflag', () => {
+        let h = nn.conv2d(ff, weights['handflag.weight'], weights['handflag.bias'], [1, 1], [0, 0]);
+        h = nn.squeeze(h);
+        h = nn.sigmoid(h);
+        return nn.reshape(h, [-1, 1]);
+      });
+
+      let handedness = await syncAndTime('head_handedness', () => {
+        let h = nn.conv2d(ff, weights['handedness.weight'], weights['handedness.bias'], [1, 1], [0, 0]);
+        h = nn.squeeze(h);
+        h = nn.sigmoid(h);
+        return nn.reshape(h, [-1, 1]);
+      });
+
+      let landmarks = await syncAndTime('head_landmarks', () => {
+        let h = nn.conv2d(ff, weights['reg_3d.weight'], weights['reg_3d.bias'], [1, 1], [0, 0]);
+        h = nn.permute(h, [0, 2, 3, 1]);
+        h = nn.reshape(h, [-1, 63]);
+        return nn.mulScalar(h, 1/256);
+      });
+
+      return { handflag, handedness, landmarks, sections };
+    }
+
+    // ============ Run Profile ============
+    async function runProfile() {
+      clearLog();
+      log('Running section profile...\n');
+
+      const torchjs = await import('/packages/torchjs/dist/index.mjs');
+
+      // Load weights
+      const [metaRes, binRes, inputRes] = await Promise.all([
+        fetch('../../../BlazePalm/ML/converted/weights.json'),
+        fetch('../../../BlazePalm/ML/converted/weights.bin'),
+        fetch('../../../BlazePalm/ML/test_outputs/test_hand_input.bin'),
+      ]);
+
+      const metadata = await metaRes.json();
+      const buffer = await binRes.arrayBuffer();
+      const inputBuffer = await inputRes.arrayBuffer();
+
+      const weights = torchjs.loadWeightsFromBuffer(metadata, buffer);
+      const testInput = { data: new Float32Array(inputBuffer), shape: [1, 3, 256, 256] };
+
+      log(`Loaded ${Object.keys(weights).length} weight tensors`);
+
+      // Setup WebGPU
+      const webgpuBackend = await torchjs.createWebGPUBackend();
+      torchjs.setBackend(webgpuBackend);
+      log('WebGPU backend initialized');
+
+      // Get device for sync
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+
+      // Warmup with regular model (5 runs)
+      log('Warming up (5 runs)...');
+      for (let i = 0; i < 5; i++) {
+        const output = torchjs.withBatch(() => torchjs.handLandmarks(testInput, weights));
+        await output.handflag.getData();
+      }
+
+      // Run profiled version
+      log('\nRunning profiled inference...\n');
+
+      const t0 = performance.now();
+      const result = await profiledHandLandmarks(testInput, weights, torchjs, device);
+      const t1 = performance.now();
+
+      // Display results
+      const totalTime = result.sections.reduce((a, b) => a + b.time, 0);
+
+      log(`Total time: ${totalTime.toFixed(2)}ms`);
+      log(`\n${'='.repeat(60)}\n`);
+
+      // Group by prefix for summary
+      const groups = {};
+      for (const s of result.sections) {
+        const prefix = s.name.split('_')[0];
+        if (!groups[prefix]) groups[prefix] = { time: 0, sections: [] };
+        groups[prefix].time += s.time;
+        groups[prefix].sections.push(s);
+      }
+
+      // Show grouped summary
+      log('GROUPED SUMMARY:');
+      log('-'.repeat(40));
+      for (const [group, data] of Object.entries(groups).sort((a, b) => b[1].time - a[1].time)) {
+        log(`${group.padEnd(15)} ${data.time.toFixed(2).padStart(8)}ms  (${(data.time/totalTime*100).toFixed(1)}%)`);
+        addResult(group, data.time, totalTime);
+      }
+
+      // Show detailed breakdown
+      log(`\n${'='.repeat(60)}\n`);
+      log('DETAILED BREAKDOWN:');
+      log('-'.repeat(40));
+      const sorted = [...result.sections].sort((a, b) => b.time - a.time);
+      for (const s of sorted) {
+        log(`${s.name.padEnd(25)} ${s.time.toFixed(2).padStart(8)}ms  (${(s.time/totalTime*100).toFixed(1)}%)`);
+      }
+
+      // Top 10 slowest
+      log(`\n${'='.repeat(60)}\n`);
+      log('TOP 10 SLOWEST:');
+      for (const s of sorted.slice(0, 10)) {
+        log(`  ${s.name}: ${s.time.toFixed(2)}ms`);
+      }
+    }
+
+    document.getElementById('runProfile').onclick = runProfile;
+
+    document.getElementById('runCompare').onclick = async () => {
+      clearLog();
+      log('TODO: Compare with MediaPipe');
+    };
+
+    log('Ready! Click "Run Section Profile" to start.');
+  </script>
+</body>
+</html>

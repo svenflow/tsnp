@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>torchjs HandLandmarks Benchmark</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 800px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #1a1a1a;
+      color: #e0e0e0;
+    }
+    h1 { color: #fff; }
+    .section {
+      background: #2a2a2a;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+    pre {
+      background: #333;
+      padding: 15px;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 13px;
+    }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      font-size: 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    button:disabled {
+      background: #666;
+      cursor: not-allowed;
+    }
+    button:hover:not(:disabled) {
+      background: #45a049;
+    }
+    .result {
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 4px;
+    }
+    .success { background: #2e7d32; }
+    .error { background: #c62828; }
+    .timing { background: #1565c0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th, td {
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid #444;
+    }
+    th { background: #333; }
+  </style>
+</head>
+<body>
+  <h1>🤖 torchjs HandLandmarks Benchmark</h1>
+
+  <div class="section">
+    <h2>Status</h2>
+    <div id="status">Loading module...</div>
+  </div>
+
+  <div class="section">
+    <h2>Controls</h2>
+    <button id="loadWeights" disabled>Load Weights</button>
+    <button id="runJS" disabled>Run JS Backend</button>
+    <button id="runWebGPU" disabled>Run WebGPU Backend</button>
+    <button id="runAll" disabled>Benchmark All</button>
+  </div>
+
+  <div class="section">
+    <h2>Results</h2>
+    <div id="results"></div>
+    <table id="benchmark-table" style="display: none;">
+      <thead>
+        <tr>
+          <th>Backend</th>
+          <th>Time (ms)</th>
+          <th>Handflag</th>
+          <th>Handedness</th>
+        </tr>
+      </thead>
+      <tbody id="benchmark-body">
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Console</h2>
+    <pre id="console"></pre>
+  </div>
+
+  <script type="module">
+    const statusEl = document.getElementById('status');
+    const resultsEl = document.getElementById('results');
+    const consoleEl = document.getElementById('console');
+    const tableEl = document.getElementById('benchmark-table');
+    const tbodyEl = document.getElementById('benchmark-body');
+
+    let weights = null;
+    let webgpuBackend = null;
+    let testInput = null;
+    let torchjs = null;
+
+    function log(msg) {
+      consoleEl.textContent += msg + '\n';
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+    }
+
+    function addResult(className, msg) {
+      const div = document.createElement('div');
+      div.className = 'result ' + className;
+      div.textContent = msg;
+      resultsEl.appendChild(div);
+    }
+
+    function addBenchmarkRow(backend, time, handflag, handedness) {
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${backend}</td>
+        <td>${time.toFixed(1)}</td>
+        <td>${handflag.toFixed(6)}</td>
+        <td>${handedness.toFixed(6)}</td>
+      `;
+      tbodyEl.appendChild(row);
+      tableEl.style.display = 'table';
+    }
+
+    // Initialize module
+    async function init() {
+      try {
+        statusEl.textContent = 'Loading torchjs module...';
+        log('Loading module...');
+
+        torchjs = await import('/packages/torchjs/dist/index.mjs');
+        log('Module loaded!');
+
+        const hasWebGPU = typeof navigator !== 'undefined' && !!navigator.gpu;
+        log(`WebGPU supported: ${hasWebGPU}`);
+
+        // Enable load button
+        document.getElementById('loadWeights').disabled = false;
+        statusEl.textContent = hasWebGPU
+          ? '✅ WebGPU available. Click "Load Weights" to start.'
+          : '⚠️ WebGPU not available. JS backend only.';
+
+        // Setup button handlers
+        document.getElementById('loadWeights').onclick = loadWeightsHandler;
+        document.getElementById('runJS').onclick = runJSHandler;
+        document.getElementById('runWebGPU').onclick = runWebGPUHandler;
+        document.getElementById('runAll').onclick = runAllHandler;
+
+      } catch (e) {
+        log(`Error loading module: ${e.message}`);
+        console.error(e);
+        statusEl.textContent = `❌ Failed to load: ${e.message}`;
+      }
+    }
+
+    async function loadWeightsHandler() {
+      try {
+        log('Loading weights...');
+        const start = performance.now();
+
+        const [metaRes, binRes, inputRes] = await Promise.all([
+          fetch('../../../BlazePalm/ML/converted/weights.json'),
+          fetch('../../../BlazePalm/ML/converted/weights.bin'),
+          fetch('../../../BlazePalm/ML/test_outputs/test_hand_input.bin'),
+        ]);
+
+        const metadata = await metaRes.json();
+        const buffer = await binRes.arrayBuffer();
+        const inputBuffer = await inputRes.arrayBuffer();
+
+        weights = torchjs.loadWeightsFromBuffer(metadata, buffer);
+        testInput = { data: new Float32Array(inputBuffer), shape: [1, 3, 256, 256] };
+
+        const elapsed = performance.now() - start;
+        log(`Loaded ${Object.keys(weights).length} weight tensors in ${elapsed.toFixed(0)}ms`);
+        log(`Input shape: ${testInput.shape.join('x')}`);
+
+        addResult('success', `Weights loaded: ${Object.keys(weights).length} tensors`);
+
+        document.getElementById('runJS').disabled = false;
+        document.getElementById('runAll').disabled = false;
+        if (navigator.gpu) {
+          document.getElementById('runWebGPU').disabled = false;
+        }
+      } catch (e) {
+        log(`Error loading weights: ${e.message}`);
+        console.error(e);
+        addResult('error', `Failed to load weights: ${e.message}`);
+      }
+    }
+
+    async function runJSBackend() {
+      log('Running JS backend...');
+      torchjs.setBackend('js');
+      const start = performance.now();
+
+      const output = torchjs.handLandmarks(testInput, weights);
+
+      const elapsed = performance.now() - start;
+      log(`JS inference: ${elapsed.toFixed(1)}ms`);
+      log(`  handflag: ${output.handflag.data[0].toFixed(6)}`);
+      log(`  handedness: ${output.handedness.data[0].toFixed(6)}`);
+
+      return {
+        time: elapsed,
+        handflag: output.handflag.data[0],
+        handedness: output.handedness.data[0],
+        landmarks: output.landmarks.data,
+      };
+    }
+
+    async function runJSHandler() {
+      try {
+        const result = await runJSBackend();
+        addBenchmarkRow('JS', result.time, result.handflag, result.handedness);
+      } catch (e) {
+        log(`Error: ${e.message}`);
+        console.error(e);
+        addResult('error', `JS error: ${e.message}`);
+      }
+    }
+
+    async function runWebGPUBackend() {
+      if (!webgpuBackend) {
+        log('Initializing WebGPU...');
+        webgpuBackend = await torchjs.createWebGPUBackend();
+      }
+
+      torchjs.setBackend(webgpuBackend);
+      log(`Backend switched to: ${torchjs.getBackend().name}`);
+
+      log('Running WebGPU backend (with command batching)...');
+      const totalStart = performance.now();
+
+      // Phase 1: Encode commands
+      const encodeStart = performance.now();
+      const output = torchjs.withBatch(() => {
+        return torchjs.handLandmarks(testInput, weights);
+      });
+      const encodeEnd = performance.now();
+
+      // Phase 2: Wait for GPU work to complete via getData
+      const getDataStart = performance.now();
+      const [handflagData, handednessData, landmarksData] = await Promise.all([
+        output.handflag.getData(),
+        output.handedness.getData(),
+        output.landmarks.getData(),
+      ]);
+      const getDataEnd = performance.now();
+
+      const totalElapsed = getDataEnd - totalStart;
+      const encodeTime = encodeEnd - encodeStart;
+      const getDataTime = getDataEnd - getDataStart;
+
+      log(`WebGPU inference: ${totalElapsed.toFixed(1)}ms`);
+      log(`  encode: ${encodeTime.toFixed(1)}ms | getData: ${getDataTime.toFixed(1)}ms`);
+      log(`  handflag: ${handflagData[0].toFixed(6)}`);
+      log(`  handedness: ${handednessData[0].toFixed(6)}`);
+
+      // Switch back to JS for fair comparison
+      torchjs.setBackend('js');
+
+      return {
+        time: totalElapsed,
+        handflag: handflagData[0],
+        handedness: handednessData[0],
+        landmarks: landmarksData,
+      };
+    }
+
+    async function runWebGPUHandler() {
+      try {
+        const result = await runWebGPUBackend();
+        addBenchmarkRow('WebGPU', result.time, result.handflag, result.handedness);
+      } catch (e) {
+        log(`Error: ${e.message}`);
+        console.error(e);
+        addResult('error', `WebGPU error: ${e.message}`);
+      }
+    }
+
+    async function runAllHandler() {
+      tbodyEl.innerHTML = '';
+      resultsEl.innerHTML = '';
+
+      try {
+        // Warmup
+        log('\n=== Warmup ===');
+        await runJSBackend();
+
+        // Actual benchmarks
+        log('\n=== Benchmark ===');
+
+        // JS (3 runs, take average)
+        const jsResults = [];
+        for (let i = 0; i < 3; i++) {
+          const r = await runJSBackend();
+          jsResults.push(r);
+        }
+        const jsAvg = jsResults.reduce((a, b) => a + b.time, 0) / jsResults.length;
+        addBenchmarkRow('JS (avg 3)', jsAvg, jsResults[0].handflag, jsResults[0].handedness);
+
+        // WebGPU if available
+        if (navigator.gpu) {
+          const webgpuResults = [];
+          for (let i = 0; i < 3; i++) {
+            const r = await runWebGPUBackend();
+            webgpuResults.push(r);
+          }
+          const webgpuAvg = webgpuResults.reduce((a, b) => a + b.time, 0) / webgpuResults.length;
+          addBenchmarkRow('WebGPU (avg 3)', webgpuAvg, webgpuResults[0].handflag, webgpuResults[0].handedness);
+        }
+
+        // Reference values
+        log('\n=== Reference (Python) ===');
+        log('  handflag: 0.999471');
+        log('  handedness: 0.000005');
+
+        addResult('success', 'Benchmark complete!');
+      } catch (e) {
+        log(`Error: ${e.message}`);
+        console.error(e);
+        addResult('error', `Benchmark error: ${e.message}`);
+      }
+    }
+
+    // Start initialization
+    init();
+  </script>
+</body>
+</html>

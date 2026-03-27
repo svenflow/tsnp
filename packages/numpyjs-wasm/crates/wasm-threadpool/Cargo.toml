@@ -1,0 +1,19 @@
+[package]
+name = "wasm-threadpool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "High-performance thread pool for WASM using static dispatch and barrier synchronization"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# No external dependencies - we use raw WASM atomics
+
+[dev-dependencies]
+
+[features]
+default = []

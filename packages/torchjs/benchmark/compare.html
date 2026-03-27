@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>torchjs vs MediaPipe Benchmark</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #1a1a1a;
+      color: #e0e0e0;
+    }
+    h1, h2 { color: #fff; }
+    .section {
+      background: #2a2a2a;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+    pre {
+      background: #333;
+      padding: 15px;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 13px;
+      max-height: 300px;
+    }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      font-size: 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    button:disabled {
+      background: #666;
+      cursor: not-allowed;
+    }
+    button:hover:not(:disabled) {
+      background: #45a049;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 15px;
+    }
+    th, td {
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid #444;
+    }
+    th { background: #333; }
+    .faster { color: #4CAF50; }
+    .slower { color: #f44336; }
+  </style>
+</head>
+<body>
+  <h1>🏁 torchjs vs MediaPipe Benchmark</h1>
+
+  <div class="section">
+    <h2>Controls</h2>
+    <button id="runAll">Run Full Comparison</button>
+    <button id="runTorchjs">Run torchjs Only</button>
+    <button id="runMediapipe">Run MediaPipe Only</button>
+  </div>
+
+  <div class="section">
+    <h2>Results</h2>
+    <table id="results-table">
+      <thead>
+        <tr>
+          <th>Library</th>
+          <th>Backend</th>
+          <th>Inference (ms)</th>
+          <th>getData (ms)</th>
+          <th>Total (ms)</th>
+          <th>FPS</th>
+        </tr>
+      </thead>
+      <tbody id="results-body"></tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Console</h2>
+    <pre id="console"></pre>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm"
+    }
+  }
+  </script>
+
+  <script type="module">
+    const consoleEl = document.getElementById('console');
+    const tbodyEl = document.getElementById('results-body');
+
+    function log(msg) {
+      consoleEl.textContent += msg + '\n';
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+      console.log(msg);
+    }
+
+    function addResult(library, backend, inference, getData, total) {
+      const fps = (1000 / total).toFixed(1);
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${library}</td>
+        <td>${backend}</td>
+        <td>${inference.toFixed(1)}</td>
+        <td>${getData.toFixed(1)}</td>
+        <td>${total.toFixed(1)}</td>
+        <td>${fps}</td>
+      `;
+      tbodyEl.appendChild(row);
+    }
+
+    // ============ Test Image ============
+    let testCanvas = null;
+    let testImageData = null;
+
+    async function loadTestImage() {
+      log('Loading test image...');
+
+      // Load the binary test input we use for torchjs
+      const inputRes = await fetch('../../../BlazePalm/ML/test_outputs/test_hand_input.bin');
+      const inputBuffer = await inputRes.arrayBuffer();
+      const f32Data = new Float32Array(inputBuffer);
+
+      // Convert from [1, 3, 256, 256] CHW to [256, 256, 4] RGBA
+      const width = 256, height = 256;
+      const rgba = new Uint8ClampedArray(width * height * 4);
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const r = f32Data[0 * height * width + y * width + x];
+          const g = f32Data[1 * height * width + y * width + x];
+          const b = f32Data[2 * height * width + y * width + x];
+
+          const idx = (y * width + x) * 4;
+          // Convert from [-1, 1] to [0, 255]
+          rgba[idx + 0] = Math.round((r + 1) * 127.5);
+          rgba[idx + 1] = Math.round((g + 1) * 127.5);
+          rgba[idx + 2] = Math.round((b + 1) * 127.5);
+          rgba[idx + 3] = 255;
+        }
+      }
+
+      testCanvas = document.createElement('canvas');
+      testCanvas.width = width;
+      testCanvas.height = height;
+      const ctx = testCanvas.getContext('2d');
+      testImageData = new ImageData(rgba, width, height);
+      ctx.putImageData(testImageData, 0, 0);
+
+      log(`Test image loaded: ${width}x${height}`);
+      return { f32Data, canvas: testCanvas };
+    }
+
+    // ============ torchjs Benchmark ============
+    async function runTorchjsBenchmark() {
+      log('\n=== torchjs Benchmark ===');
+
+      const torchjs = await import('/packages/torchjs/dist/index.mjs');
+
+      // Load weights
+      const [metaRes, binRes, inputRes] = await Promise.all([
+        fetch('../../../BlazePalm/ML/converted/weights.json'),
+        fetch('../../../BlazePalm/ML/converted/weights.bin'),
+        fetch('../../../BlazePalm/ML/test_outputs/test_hand_input.bin'),
+      ]);
+
+      const metadata = await metaRes.json();
+      const buffer = await binRes.arrayBuffer();
+      const inputBuffer = await inputRes.arrayBuffer();
+
+      const weights = torchjs.loadWeightsFromBuffer(metadata, buffer);
+      const testInput = { data: new Float32Array(inputBuffer), shape: [1, 3, 256, 256] };
+
+      log(`Loaded ${Object.keys(weights).length} weight tensors`);
+
+      // Setup WebGPU
+      const webgpuBackend = await torchjs.createWebGPUBackend();
+      torchjs.setBackend(webgpuBackend);
+      log('WebGPU backend initialized');
+
+      // Warmup - need 10+ runs to ensure all shaders are compiled and GPU is warm
+      log('Warming up (10 runs)...');
+      for (let i = 0; i < 10; i++) {
+        const output = torchjs.withBatch(() => torchjs.handLandmarks(testInput, weights));
+        await output.handflag.getData();
+      }
+
+      // Benchmark: 10 iterations
+      log('Running 10 iterations...');
+      const results = [];
+
+      for (let i = 0; i < 10; i++) {
+        const t0 = performance.now();
+        const output = torchjs.withBatch(() => torchjs.handLandmarks(testInput, weights));
+        const t1 = performance.now();
+
+        // Wait for GPU work to complete
+        const device = output.handflag.device;
+        await device.queue.onSubmittedWorkDone();
+        const t2 = performance.now();
+
+        // Use batchGetData - single mapAsync call for all 3 tensors
+        await torchjs.WebGPUTensor.batchGetData([
+          output.handflag,
+          output.handedness,
+          output.landmarks,
+        ]);
+        const t3 = performance.now();
+
+        results.push({
+          encode: t1 - t0,
+          gpuWork: t2 - t1,
+          mapAsync: t3 - t2,
+          total: t3 - t0
+        });
+      }
+
+      // Average
+      const avgEncode = results.reduce((a, b) => a + b.encode, 0) / results.length;
+      const avgGpuWork = results.reduce((a, b) => a + b.gpuWork, 0) / results.length;
+      const avgMapAsync = results.reduce((a, b) => a + b.mapAsync, 0) / results.length;
+      const avgTotal = results.reduce((a, b) => a + b.total, 0) / results.length;
+
+      log(`torchjs WebGPU breakdown:`);
+      log(`  - encode commands: ${avgEncode.toFixed(1)}ms`);
+      log(`  - GPU work (onSubmittedWorkDone): ${avgGpuWork.toFixed(1)}ms`);
+      log(`  - mapAsync (buffer copy): ${avgMapAsync.toFixed(1)}ms`);
+      log(`  - total: ${avgTotal.toFixed(1)}ms`);
+      addResult('torchjs', 'WebGPU', avgEncode + avgGpuWork, avgMapAsync, avgTotal);
+
+      return { encode: avgEncode, gpuWork: avgGpuWork, mapAsync: avgMapAsync, total: avgTotal };
+    }
+
+    // ============ MediaPipe Benchmark ============
+    async function runMediapipeBenchmark() {
+      log('\n=== MediaPipe Benchmark ===');
+
+      try {
+        const vision = await import('@mediapipe/tasks-vision');
+        const { HandLandmarker, FilesetResolver } = vision;
+
+        log('Loading MediaPipe vision tasks...');
+        const wasmFiles = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+        );
+
+        log('Creating HandLandmarker...');
+        const handLandmarker = await HandLandmarker.createFromOptions(wasmFiles, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+            delegate: 'GPU'
+          },
+          runningMode: 'IMAGE',
+          numHands: 1
+        });
+
+        log('MediaPipe HandLandmarker ready (GPU delegate)');
+
+        // Get test image
+        const { canvas } = await loadTestImage();
+
+        // Warmup
+        log('Warming up (3 runs)...');
+        for (let i = 0; i < 3; i++) {
+          handLandmarker.detect(canvas);
+        }
+
+        // Benchmark: 10 iterations
+        log('Running 10 iterations...');
+        const results = [];
+
+        for (let i = 0; i < 10; i++) {
+          const t0 = performance.now();
+          const result = handLandmarker.detect(canvas);
+          const t1 = performance.now();
+
+          results.push({
+            total: t1 - t0,
+            hasHands: result.landmarks.length > 0
+          });
+        }
+
+        // Average
+        const avgTotal = results.reduce((a, b) => a + b.total, 0) / results.length;
+
+        log(`MediaPipe GPU: ${avgTotal.toFixed(1)}ms avg`);
+        log(`Hands detected: ${results[0].hasHands ? 'yes' : 'no'}`);
+
+        // MediaPipe doesn't separate inference/getData - it's all sync
+        addResult('MediaPipe', 'GPU (WebGL)', avgTotal, 0, avgTotal);
+
+        handLandmarker.close();
+        return { inference: avgTotal, getData: 0, total: avgTotal };
+
+      } catch (e) {
+        log(`MediaPipe error: ${e.message}`);
+        console.error(e);
+        return null;
+      }
+    }
+
+    // ============ Button Handlers ============
+    document.getElementById('runAll').onclick = async () => {
+      tbodyEl.innerHTML = '';
+      consoleEl.textContent = '';
+
+      const torchResult = await runTorchjsBenchmark();
+      const mediapipeResult = await runMediapipeBenchmark();
+
+      if (torchResult && mediapipeResult) {
+        log('\n=== Summary ===');
+        const ratio = (torchResult.total / mediapipeResult.total).toFixed(2);
+        log(`torchjs is ${ratio}x ${torchResult.total > mediapipeResult.total ? 'slower' : 'faster'} than MediaPipe`);
+      }
+    };
+
+    document.getElementById('runTorchjs').onclick = async () => {
+      tbodyEl.innerHTML = '';
+      consoleEl.textContent = '';
+      await runTorchjsBenchmark();
+    };
+
+    document.getElementById('runMediapipe').onclick = async () => {
+      tbodyEl.innerHTML = '';
+      consoleEl.textContent = '';
+      await loadTestImage();
+      await runMediapipeBenchmark();
+    };
+
+    log('Ready! Click a button to run benchmarks.');
+  </script>
+</body>
+</html>

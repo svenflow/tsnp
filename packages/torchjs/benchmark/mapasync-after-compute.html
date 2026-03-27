@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>mapAsync After Compute Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      background: #1a1a1a;
+      color: #e0e0e0;
+      padding: 20px;
+    }
+    pre { background: #333; padding: 15px; border-radius: 4px; }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      cursor: pointer;
+      margin: 5px;
+    }
+  </style>
+</head>
+<body>
+  <h1>mapAsync After Compute Test</h1>
+  <p>Test mapAsync latency after actual GPU compute work</p>
+  <button id="run">Run Test</button>
+  <pre id="out"></pre>
+
+  <script type="module">
+    const out = document.getElementById('out');
+    function log(msg) {
+      out.textContent += msg + '\n';
+    }
+
+    async function test() {
+      out.textContent = '';
+
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+      log('WebGPU device ready\n');
+
+      // Create a simple compute shader that does some work
+      const shaderModule = device.createShaderModule({
+        code: `
+          @group(0) @binding(0) var<storage, read_write> data: array<f32>;
+
+          @compute @workgroup_size(256)
+          fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+            let idx = gid.x;
+            if (idx >= arrayLength(&data)) { return; }
+            // Do some work
+            var x = data[idx];
+            for (var i = 0u; i < 100u; i = i + 1u) {
+              x = sin(x) + cos(x);
+            }
+            data[idx] = x;
+          }
+        `
+      });
+
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: shaderModule, entryPoint: 'main' }
+      });
+
+      // Test different compute amounts
+      const sizes = [1024, 65536, 262144, 1048576];
+
+      for (const size of sizes) {
+        // Create storage buffer
+        const storageBuffer = device.createBuffer({
+          size: size * 4,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+          mappedAtCreation: true,
+        });
+        const initData = new Float32Array(storageBuffer.getMappedRange());
+        for (let i = 0; i < size; i++) initData[i] = Math.random();
+        storageBuffer.unmap();
+
+        // Create staging buffer
+        const stagingBuffer = device.createBuffer({
+          size: size * 4,
+          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
+        const bindGroup = device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [{ binding: 0, resource: { buffer: storageBuffer } }],
+        });
+
+        // Warmup
+        for (let i = 0; i < 3; i++) {
+          const enc = device.createCommandEncoder();
+          const pass = enc.beginComputePass();
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(0, bindGroup);
+          pass.dispatchWorkgroups(Math.ceil(size / 256));
+          pass.end();
+          enc.copyBufferToBuffer(storageBuffer, 0, stagingBuffer, 0, size * 4);
+          device.queue.submit([enc.finish()]);
+          await stagingBuffer.mapAsync(GPUMapMode.READ);
+          stagingBuffer.unmap();
+        }
+
+        // Timed run
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(Math.ceil(size / 256));
+        pass.end();
+
+        const t0 = performance.now();
+        enc.copyBufferToBuffer(storageBuffer, 0, stagingBuffer, 0, size * 4);
+        device.queue.submit([enc.finish()]);
+        const t1 = performance.now();
+
+        await stagingBuffer.mapAsync(GPUMapMode.READ);
+        const t2 = performance.now();
+
+        const data = new Float32Array(stagingBuffer.getMappedRange());
+        stagingBuffer.unmap();
+
+        log(`Size: ${size.toString().padStart(7)} floats`);
+        log(`  submit:   ${(t1 - t0).toFixed(2)}ms`);
+        log(`  mapAsync: ${(t2 - t1).toFixed(2)}ms`);
+        log(`  total:    ${(t2 - t0).toFixed(2)}ms`);
+        log('');
+
+        storageBuffer.destroy();
+        stagingBuffer.destroy();
+      }
+
+      log('--- Testing with onSubmittedWorkDone ---\n');
+
+      for (const size of [65536, 262144]) {
+        // Create storage buffer
+        const storageBuffer = device.createBuffer({
+          size: size * 4,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+          mappedAtCreation: true,
+        });
+        new Float32Array(storageBuffer.getMappedRange()).fill(1);
+        storageBuffer.unmap();
+
+        const stagingBuffer = device.createBuffer({
+          size: size * 4,
+          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
+        const bindGroup = device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [{ binding: 0, resource: { buffer: storageBuffer } }],
+        });
+
+        const enc = device.createCommandEncoder();
+        const pass = enc.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(Math.ceil(size / 256));
+        pass.end();
+        enc.copyBufferToBuffer(storageBuffer, 0, stagingBuffer, 0, size * 4);
+
+        const t0 = performance.now();
+        device.queue.submit([enc.finish()]);
+        const t1 = performance.now();
+
+        await device.queue.onSubmittedWorkDone();
+        const t2 = performance.now();
+
+        await stagingBuffer.mapAsync(GPUMapMode.READ);
+        const t3 = performance.now();
+
+        stagingBuffer.unmap();
+
+        log(`Size: ${size} floats`);
+        log(`  submit:              ${(t1 - t0).toFixed(2)}ms`);
+        log(`  onSubmittedWorkDone: ${(t2 - t1).toFixed(2)}ms`);
+        log(`  mapAsync (after):    ${(t3 - t2).toFixed(2)}ms`);
+        log('');
+
+        storageBuffer.destroy();
+        stagingBuffer.destroy();
+      }
+    }
+
+    document.getElementById('run').onclick = test;
+    log('Click "Run Test" to start');
+  </script>
+</body>
+</html>

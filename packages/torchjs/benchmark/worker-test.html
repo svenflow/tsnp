@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Worker WebGPU mapSync Test</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #1a1a1a;
+      color: #e0e0e0;
+    }
+    h1, h2 { color: #fff; }
+    .section {
+      background: #2a2a2a;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+    pre {
+      background: #333;
+      padding: 15px;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 13px;
+      max-height: 400px;
+    }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      font-size: 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    button:disabled {
+      background: #666;
+      cursor: not-allowed;
+    }
+    .warning {
+      background: #553300;
+      border: 1px solid #aa6600;
+      padding: 15px;
+      border-radius: 4px;
+      margin: 10px 0;
+    }
+    .success {
+      background: #003322;
+      border: 1px solid #00aa66;
+      padding: 15px;
+      border-radius: 4px;
+      margin: 10px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>🔧 Worker WebGPU mapSync Test</h1>
+
+  <div class="section">
+    <h2>About</h2>
+    <p>This test runs WebGPU inference in a Web Worker to check if <code>mapSync()</code> is available.</p>
+    <p><strong>To enable mapSync:</strong> Start Chrome with:</p>
+    <pre>open -a "Google Chrome" --args --enable-features=WebGPUMapSyncOnWorkers</pre>
+    <p>mapSync is synchronous buffer mapping that avoids the ~20ms async overhead.</p>
+  </div>
+
+  <div class="section">
+    <h2>Controls</h2>
+    <button id="runTest">Run Worker Benchmark</button>
+  </div>
+
+  <div class="section">
+    <h2>Console</h2>
+    <pre id="console"></pre>
+  </div>
+
+  <script type="module">
+    const consoleEl = document.getElementById('console');
+
+    function log(msg) {
+      consoleEl.textContent += msg + '\n';
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+      console.log(msg);
+    }
+
+    async function runWorkerBenchmark() {
+      log('=== Worker mapSync Test ===\n');
+
+      // Load test input
+      log('Loading test input...');
+      const inputRes = await fetch('../../../BlazePalm/ML/test_outputs/test_hand_input.bin');
+      const inputBuffer = await inputRes.arrayBuffer();
+      log(`Input loaded: ${inputBuffer.byteLength} bytes`);
+
+      // Create worker
+      log('Creating worker...');
+      const worker = new Worker('./worker-inference.js', { type: 'module' });
+
+      return new Promise((resolve) => {
+        let results = [];
+
+        worker.onmessage = async (e) => {
+          const { type, ...data } = e.data;
+
+          if (type === 'ready') {
+            log(`Worker ready!`);
+            log(`  Weights loaded: ${data.weightCount}`);
+            log(`  mapSync available: ${data.hasMapSync ? '✅ YES!' : '❌ No (using mapAsync)'}`);
+
+            if (data.hasMapSync) {
+              log('\n🎉 mapSync IS AVAILABLE! This should be MUCH faster.\n');
+            } else {
+              log('\n⚠️ mapSync not available. Start Chrome with:');
+              log('   --enable-features=WebGPUMapSyncOnWorkers\n');
+            }
+
+            // Warmup
+            log('Warming up (3 runs)...');
+            for (let i = 0; i < 3; i++) {
+              worker.postMessage({ type: 'inference', data: { inputBuffer } });
+              await new Promise(r => {
+                const handler = (e) => {
+                  if (e.data.type === 'result') {
+                    worker.removeEventListener('message', handler);
+                    r();
+                  }
+                };
+                worker.addEventListener('message', handler);
+              });
+            }
+
+            // Benchmark
+            log('Running 10 iterations...');
+            results = [];
+
+            for (let i = 0; i < 10; i++) {
+              worker.postMessage({ type: 'inference', data: { inputBuffer } });
+            }
+          }
+
+          if (type === 'result') {
+            results.push(data);
+            log(`  Run ${results.length}: ${data.total.toFixed(1)}ms (${data.inference.toFixed(1)}ms + ${data.getData.toFixed(1)}ms)`);
+
+            if (results.length === 10) {
+              const avgInference = results.reduce((a, b) => a + b.inference, 0) / 10;
+              const avgGetData = results.reduce((a, b) => a + b.getData, 0) / 10;
+              const avgTotal = results.reduce((a, b) => a + b.total, 0) / 10;
+              const fps = 1000 / avgTotal;
+
+              log(`\n=== Results ===`);
+              log(`Average inference: ${avgInference.toFixed(1)}ms`);
+              log(`Average getData:   ${avgGetData.toFixed(1)}ms`);
+              log(`Average total:     ${avgTotal.toFixed(1)}ms`);
+              log(`FPS:               ${fps.toFixed(1)}`);
+              log(`\nHandflag: ${data.handflag.toFixed(6)}`);
+              log(`Handedness: ${data.handedness.toFixed(6)}`);
+
+              worker.terminate();
+              resolve();
+            }
+          }
+
+          if (type === 'error') {
+            log(`ERROR: ${data.error}`);
+            worker.terminate();
+            resolve();
+          }
+        };
+
+        worker.postMessage({ type: 'init' });
+      });
+    }
+
+    document.getElementById('runTest').onclick = async () => {
+      consoleEl.textContent = '';
+      await runWorkerBenchmark();
+    };
+
+    log('Ready! Click "Run Worker Benchmark" to test.');
+    log('');
+    log('This tests if mapSync is available in workers.');
+    log('If not available, it falls back to mapAsync.');
+  </script>
+</body>
+</html>

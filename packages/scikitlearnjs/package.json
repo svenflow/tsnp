@@ -1,17 +1,54 @@
 {
   "name": "scikitlearnjs",
-  "version": "0.0.1",
-  "description": "scikit-learn for JavaScript - Machine learning library",
+  "version": "0.1.0",
+  "description": "scikit-learn compatible machine learning library for JavaScript",
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
-    "test": "vitest"
+    "test": "vitest run",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
   },
-  "keywords": ["machine-learning", "ml", "sklearn", "scikit-learn", "javascript"],
-  "author": "pydatajs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/svenflow/pydatajs.git",
+    "directory": "packages/scikitlearnjs"
+  },
+  "keywords": [
+    "machine-learning",
+    "ml",
+    "sklearn",
+    "scikit-learn",
+    "javascript",
+    "classification",
+    "regression",
+    "clustering"
+  ],
+  "author": "Sven",
   "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/svenflow/pydatajs/issues"
+  },
+  "homepage": "https://github.com/svenflow/pydatajs/tree/main/packages/scikitlearnjs#readme",
   "dependencies": {
     "numpyjs": "workspace:*"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.40",
+    "typescript": "^5.4.0",
+    "vitest": "^1.4.0"
   }
 }

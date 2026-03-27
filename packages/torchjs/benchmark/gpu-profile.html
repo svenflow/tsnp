@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>torchjs GPU Kernel Profiler (Timestamp Queries)</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 1200px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #1a1a1a;
+      color: #e0e0e0;
+    }
+    h1, h2 { color: #fff; }
+    .section {
+      background: #2a2a2a;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+    pre {
+      background: #333;
+      padding: 15px;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 12px;
+      max-height: 600px;
+    }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      font-size: 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    button:disabled {
+      background: #666;
+      cursor: not-allowed;
+    }
+    button:hover:not(:disabled) {
+      background: #45a049;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 15px;
+      font-size: 12px;
+    }
+    th, td {
+      padding: 8px 12px;
+      text-align: left;
+      border-bottom: 1px solid #444;
+    }
+    th { background: #333; }
+    .bar {
+      background: #4CAF50;
+      height: 16px;
+      border-radius: 2px;
+    }
+    .bar-container {
+      background: #333;
+      width: 200px;
+      border-radius: 2px;
+    }
+    .highlight { background: #3a3a3a; }
+    .warning { color: #ff9800; }
+    .error { color: #f44336; }
+  </style>
+</head>
+<body>
+  <h1>🔬 torchjs GPU Kernel Profiler</h1>
+  <p>Uses WebGPU timestamp queries for accurate GPU kernel timing.</p>
+
+  <div class="section">
+    <h2>Device Info</h2>
+    <pre id="device-info">Checking WebGPU support...</pre>
+  </div>
+
+  <div class="section">
+    <h2>Controls</h2>
+    <button id="runProfile">Run GPU Profile</button>
+    <button id="runFallback">Run Fallback Profile (no timestamps)</button>
+  </div>
+
+  <div class="section">
+    <h2>Results</h2>
+    <pre id="results">Click a button to run profiler...</pre>
+  </div>
+
+  <script type="module">
+    const deviceInfoEl = document.getElementById('device-info');
+    const resultsEl = document.getElementById('results');
+
+    function log(msg) {
+      resultsEl.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    function clearLog() {
+      resultsEl.textContent = '';
+    }
+
+    // Check device capabilities
+    async function checkDevice() {
+      if (!navigator.gpu) {
+        deviceInfoEl.innerHTML = '<span class="error">WebGPU not supported!</span>';
+        return null;
+      }
+
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        deviceInfoEl.innerHTML = '<span class="error">No GPU adapter found!</span>';
+        return null;
+      }
+
+      const features = [...adapter.features];
+      const hasTimestamp = features.includes('timestamp-query');
+
+      let info = `Adapter: ${adapter.info?.device || 'unknown'}\n`;
+      info += `Vendor: ${adapter.info?.vendor || 'unknown'}\n`;
+      info += `Architecture: ${adapter.info?.architecture || 'unknown'}\n`;
+      info += `\nFeatures: ${features.join(', ')}\n`;
+      info += `\nTimestamp Query: ${hasTimestamp ? '✅ Available' : '❌ Not available'}`;
+
+      if (!hasTimestamp) {
+        info += '\n\n<span class="warning">To enable timestamp queries on Chrome:</span>';
+        info += '\nRun Chrome with: --enable-dawn-features=allow_unsafe_apis';
+      }
+
+      deviceInfoEl.innerHTML = info;
+
+      // Request device with timestamp-query if available
+      const requiredFeatures = hasTimestamp ? ['timestamp-query'] : [];
+      const device = await adapter.requestDevice({
+        requiredFeatures,
+      });
+
+      return { device, hasTimestamp };
+    }
+
+    // Create a profiled compute pass wrapper
+    class GPUProfiler {
+      constructor(device, hasTimestamp) {
+        this.device = device;
+        this.hasTimestamp = hasTimestamp;
+        this.querySet = null;
+        this.resolveBuffer = null;
+        this.readBuffer = null;
+        this.operations = [];
+        this.maxOps = 500;  // Max operations to track
+
+        if (hasTimestamp) {
+          // Each op needs 2 timestamps (before/after)
+          this.querySet = device.createQuerySet({
+            type: 'timestamp',
+            count: this.maxOps * 2,
+          });
+
+          this.resolveBuffer = device.createBuffer({
+            size: this.maxOps * 2 * 8,  // 8 bytes per timestamp (u64)
+            usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+          });
+
+          this.readBuffer = device.createBuffer({
+            size: this.maxOps * 2 * 8,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+          });
+        }
+      }
+
+      reset() {
+        this.operations = [];
+      }
+
+      // Record an operation name - call before dispatch
+      startOp(name) {
+        const idx = this.operations.length;
+        if (idx >= this.maxOps) {
+          console.warn('Max operations reached, skipping:', name);
+          return -1;
+        }
+        this.operations.push({ name, start: 0, end: 0 });
+        return idx;
+      }
+
+      // Get timestamp indices for an operation
+      getTimestampIndices(opIdx) {
+        return {
+          start: opIdx * 2,
+          end: opIdx * 2 + 1,
+        };
+      }
+
+      async resolve(encoder) {
+        if (!this.hasTimestamp) return;
+
+        encoder.resolveQuerySet(
+          this.querySet,
+          0,
+          this.operations.length * 2,
+          this.resolveBuffer,
+          0
+        );
+
+        encoder.copyBufferToBuffer(
+          this.resolveBuffer, 0,
+          this.readBuffer, 0,
+          this.operations.length * 2 * 8
+        );
+      }
+
+      async readResults() {
+        if (!this.hasTimestamp) return null;
+
+        await this.readBuffer.mapAsync(GPUMapMode.READ);
+        const data = new BigUint64Array(this.readBuffer.getMappedRange());
+
+        const results = [];
+        for (let i = 0; i < this.operations.length; i++) {
+          const start = data[i * 2];
+          const end = data[i * 2 + 1];
+          // Convert nanoseconds to milliseconds
+          const durationNs = Number(end - start);
+          const durationMs = durationNs / 1_000_000;
+          results.push({
+            name: this.operations[i].name,
+            durationMs,
+          });
+        }
+
+        this.readBuffer.unmap();
+        return results;
+      }
+    }
+
+    // Run fallback profile (using onSubmittedWorkDone between ops)
+    async function runFallbackProfile() {
+      clearLog();
+      log('Running fallback profile (sync between ops)...\n');
+
+      const { device } = await checkDevice();
+      if (!device) return;
+
+      const torchjs = await import('/packages/torchjs/dist/index.mjs');
+
+      // Load weights
+      const [metaRes, binRes, inputRes] = await Promise.all([
+        fetch('../../../BlazePalm/ML/converted/weights.json'),
+        fetch('../../../BlazePalm/ML/converted/weights.bin'),
+        fetch('../../../BlazePalm/ML/test_outputs/test_hand_input.bin'),
+      ]);
+
+      const metadata = await metaRes.json();
+      const buffer = await binRes.arrayBuffer();
+      const inputBuffer = await inputRes.arrayBuffer();
+
+      const weights = torchjs.loadWeightsFromBuffer(metadata, buffer);
+      const testInput = { data: new Float32Array(inputBuffer), shape: [1, 3, 256, 256] };
+
+      log(`Loaded ${Object.keys(weights).length} weight tensors`);
+
+      // Setup WebGPU
+      const webgpuBackend = await torchjs.createWebGPUBackend();
+      torchjs.setBackend(webgpuBackend);
+      log('WebGPU backend initialized');
+
+      // Warmup
+      log('Warming up (5 runs)...');
+      for (let i = 0; i < 5; i++) {
+        const output = torchjs.withBatch(() => torchjs.handLandmarks(testInput, weights));
+        await output.handflag.getData();
+      }
+
+      // Profile with individual op timing using forced syncs
+      log('\nProfiling with forced sync between major sections...\n');
+
+      const opTimings = {};
+      const opsToProfile = [
+        'relu', 'sigmoid', 'conv2d', 'depthwiseConv2d', 'maxPool2d',
+        'pad', 'add', 'addRelu', 'upsampleBilinear', 'mulScalar', 'reshape', 'permute', 'squeeze'
+      ];
+
+      // Wrap ops with timing
+      const originalMethods = {};
+      for (const op of opsToProfile) {
+        if (webgpuBackend[op]) {
+          originalMethods[op] = webgpuBackend[op].bind(webgpuBackend);
+          opTimings[op] = { count: 0, total: 0 };
+          webgpuBackend[op] = async function(...args) {
+            const result = originalMethods[op](...args);
+            // Force GPU sync
+            await device.queue.onSubmittedWorkDone();
+            return result;
+          };
+        }
+      }
+
+      // Run single inference with per-op timing
+      const t0 = performance.now();
+      const output = torchjs.withBatch(() => torchjs.handLandmarks(testInput, weights));
+      const t1 = performance.now();
+
+      await output.handflag.getData();
+      const t2 = performance.now();
+
+      log(`Total encode: ${(t1 - t0).toFixed(2)}ms`);
+      log(`Total getData: ${(t2 - t1).toFixed(2)}ms`);
+      log(`\n⚠️ Note: Fallback mode adds overhead due to sync between ops.`);
+      log('For accurate GPU timing, use Chrome with --enable-dawn-features=allow_unsafe_apis');
+
+      // Restore
+      for (const op of Object.keys(originalMethods)) {
+        webgpuBackend[op] = originalMethods[op];
+      }
+    }
+
+    // Run profile with timestamp queries
+    async function runTimestampProfile() {
+      clearLog();
+      log('Running GPU profile with timestamp queries...\n');
+
+      const result = await checkDevice();
+      if (!result) return;
+
+      const { device, hasTimestamp } = result;
+
+      if (!hasTimestamp) {
+        log('❌ Timestamp queries not available.');
+        log('To enable: Run Chrome with --enable-dawn-features=allow_unsafe_apis');
+        log('\nFalling back to sync-based profiling...\n');
+        await runFallbackProfile();
+        return;
+      }
+
+      log('✅ Timestamp queries available!\n');
+
+      // For now, just show that it works
+      // A full implementation would need to modify the backend to insert timestamp writes
+      log('TODO: Implement timestamp query injection into WebGPU backend.');
+      log('This requires modifying the backend to insert writeTimestamp calls around each dispatch.');
+      log('\nConcept:');
+      log('1. Create GPUQuerySet with type "timestamp"');
+      log('2. In each compute pass, call pass.writeTimestamp(querySet, index) before and after dispatch');
+      log('3. After all dispatches, call encoder.resolveQuerySet() to copy timestamps to buffer');
+      log('4. Read buffer to get nanosecond timings for each operation');
+      log('\nFor now, use Chrome DevTools Performance tab or chrome://gpu for GPU timing info.');
+    }
+
+    // Button handlers
+    document.getElementById('runProfile').onclick = runTimestampProfile;
+    document.getElementById('runFallback').onclick = runFallbackProfile;
+
+    // Check device on load
+    checkDevice();
+  </script>
+</body>
+</html>

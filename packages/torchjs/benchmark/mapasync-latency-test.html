@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>mapAsync Latency Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      background: #1a1a1a;
+      color: #e0e0e0;
+      padding: 20px;
+    }
+    pre { background: #333; padding: 15px; border-radius: 4px; }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      cursor: pointer;
+      margin: 5px;
+    }
+  </style>
+</head>
+<body>
+  <h1>mapAsync Latency Test</h1>
+  <p>Test if mapAsync latency depends on buffer size</p>
+  <button id="run">Run Test</button>
+  <pre id="out"></pre>
+
+  <script type="module">
+    const out = document.getElementById('out');
+    function log(msg) {
+      out.textContent += msg + '\n';
+    }
+
+    async function test() {
+      out.textContent = '';
+
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+      log('WebGPU device ready\n');
+
+      // Test different buffer sizes
+      const sizes = [4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144];
+
+      for (const size of sizes) {
+        // Create source buffer with some data
+        const srcBuffer = device.createBuffer({
+          size: size * 4,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+          mappedAtCreation: true,
+        });
+        new Float32Array(srcBuffer.getMappedRange()).fill(1.23);
+        srcBuffer.unmap();
+
+        // Create staging buffer
+        const stagingBuffer = device.createBuffer({
+          size: size * 4,
+          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
+        // Copy
+        const encoder = device.createCommandEncoder();
+        encoder.copyBufferToBuffer(srcBuffer, 0, stagingBuffer, 0, size * 4);
+        device.queue.submit([encoder.finish()]);
+
+        // Time mapAsync
+        const t0 = performance.now();
+        await stagingBuffer.mapAsync(GPUMapMode.READ);
+        const t1 = performance.now();
+        const data = new Float32Array(stagingBuffer.getMappedRange());
+        stagingBuffer.unmap();
+
+        log(`Size: ${size.toString().padStart(6)} floats (${(size * 4).toString().padStart(8)} bytes) → mapAsync: ${(t1 - t0).toFixed(2)}ms`);
+
+        srcBuffer.destroy();
+        stagingBuffer.destroy();
+      }
+
+      log('\n--- Testing multiple sequential mapAsync calls ---\n');
+
+      // Test if multiple calls back-to-back are faster
+      for (let batch = 1; batch <= 5; batch++) {
+        const buffers = [];
+        for (let i = 0; i < batch; i++) {
+          const buf = device.createBuffer({
+            size: 256,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+          });
+          buffers.push(buf);
+        }
+
+        const encoder = device.createCommandEncoder();
+        for (const buf of buffers) {
+          // Create dummy source and copy
+          const src = device.createBuffer({
+            size: 256,
+            usage: GPUBufferUsage.COPY_SRC,
+            mappedAtCreation: true,
+          });
+          new Float32Array(src.getMappedRange()).fill(1);
+          src.unmap();
+          encoder.copyBufferToBuffer(src, 0, buf, 0, 256);
+        }
+        device.queue.submit([encoder.finish()]);
+
+        const t0 = performance.now();
+        for (const buf of buffers) {
+          await buf.mapAsync(GPUMapMode.READ);
+          buf.unmap();
+        }
+        const t1 = performance.now();
+
+        log(`${batch} sequential mapAsync calls: ${(t1 - t0).toFixed(2)}ms (${((t1 - t0) / batch).toFixed(2)}ms each)`);
+
+        for (const buf of buffers) buf.destroy();
+      }
+
+      log('\n--- Testing parallel mapAsync calls (Promise.all) ---\n');
+
+      for (let batch = 1; batch <= 5; batch++) {
+        const buffers = [];
+        for (let i = 0; i < batch; i++) {
+          const buf = device.createBuffer({
+            size: 256,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+          });
+          buffers.push(buf);
+        }
+
+        const encoder = device.createCommandEncoder();
+        for (const buf of buffers) {
+          const src = device.createBuffer({
+            size: 256,
+            usage: GPUBufferUsage.COPY_SRC,
+            mappedAtCreation: true,
+          });
+          new Float32Array(src.getMappedRange()).fill(1);
+          src.unmap();
+          encoder.copyBufferToBuffer(src, 0, buf, 0, 256);
+        }
+        device.queue.submit([encoder.finish()]);
+
+        const t0 = performance.now();
+        await Promise.all(buffers.map(buf => buf.mapAsync(GPUMapMode.READ)));
+        const t1 = performance.now();
+
+        for (const buf of buffers) {
+          buf.unmap();
+          buf.destroy();
+        }
+
+        log(`${batch} parallel mapAsync calls: ${(t1 - t0).toFixed(2)}ms`);
+      }
+    }
+
+    document.getElementById('run').onclick = test;
+    log('Click "Run Test" to start');
+  </script>
+</body>
+</html>

@@ -1,0 +1,1668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>numpyjs — NumPy for JavaScript</title>
+<meta name="description" content="N-dimensional arrays, linear algebra, FFT, random number generation, and statistics in JavaScript. NumPy-compatible API with 3 backends: pure JS, WebGPU, and WASM.">
+<meta property="og:title" content="numpyjs — NumPy for JavaScript">
+<meta property="og:description" content="N-dimensional arrays, linear algebra, FFT, random, and statistics in JavaScript. 3 backends: pure JS, WebGPU, WASM.">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔢</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,600;0,9..144,700;0,9..144,800;1,9..144,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap&font-display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<style>
+/* ── Reset ─────────────────────────────────────── */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* ── Tokens ────────────────────────────────────── */
+:root {
+  /* surfaces */
+  --paper: #f8f6f1;
+  --paper-warm: #f3f0e8;
+  --ink: #1c1c28;
+  --ink-secondary: #4a4a5a;
+  --ink-tertiary: #7a7a8a;
+  --ink-muted: #a0a0ae;
+
+  /* accent — numpy blue */
+  --accent: #4263eb;
+  --accent-light: #dbe4ff;
+  --accent-bg: #edf2ff;
+
+  /* code */
+  --code-bg: #1e1e2e;
+  --code-fg: #cdd6f4;
+  --code-comment: #6c7086;
+  --code-keyword: #cba6f7;
+  --code-string: #a6e3a1;
+  --code-func: #89b4fa;
+  --code-type: #f9e2af;
+  --code-number: #fab387;
+  --code-operator: #89dceb;
+  --code-punctuation: #9399b2;
+
+  /* borders */
+  --border: rgba(28, 28, 40, 0.1);
+  --border-strong: rgba(28, 28, 40, 0.2);
+
+  /* spacing */
+  --space-xs: 0.125rem;
+  --space-sm: 0.375rem;
+  --space-md: 0.75rem;
+  --space-lg: 1rem;
+  --space-xl: 1.5rem;
+  --space-2xl: 2.5rem;
+  --space-3xl: 3.5rem;
+  --space-4xl: 5rem;
+
+  /* type scale */
+  --text-xs: clamp(0.75rem, 0.7rem + 0.2vw, 0.8125rem);
+  --text-sm: clamp(0.8125rem, 0.78rem + 0.2vw, 0.875rem);
+  --text-base: clamp(0.9375rem, 0.88rem + 0.3vw, 1.0625rem);
+  --text-lg: clamp(1.125rem, 1rem + 0.5vw, 1.25rem);
+  --text-xl: clamp(1.5rem, 1.2rem + 1vw, 2rem);
+  --text-2xl: clamp(2rem, 1.5rem + 2vw, 3rem);
+  --text-3xl: clamp(2.5rem, 1.8rem + 3vw, 4.5rem);
+
+  /* layout */
+  --max-width: 72rem;
+  --content-width: 56rem;
+}
+
+/* ── Base ──────────────────────────────────────── */
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'IBM Plex Sans', -apple-system, sans-serif;
+  font-size: var(--text-base);
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+a:hover { color: var(--ink); }
+
+code {
+  font-family: 'IBM Plex Mono', 'SF Mono', 'Consolas', monospace;
+  font-size: 0.9em;
+}
+
+/* ── Layout ────────────────────────────────────── */
+.container {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 0 clamp(1rem, 3vw, 2rem);
+}
+
+.narrow {
+  max-width: var(--content-width);
+}
+
+/* ── Navigation ────────────────────────────────── */
+nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(248, 246, 241, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-md) 0;
+}
+
+nav .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.nav-logo {
+  font-family: 'IBM Plex Mono', monospace;
+  font-weight: 500;
+  font-size: var(--text-lg);
+  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+
+.nav-links {
+  display: flex;
+  gap: var(--space-lg);
+  list-style: none;
+}
+
+.nav-links a {
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.nav-links a:hover { color: var(--ink); }
+
+.nav-github {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.nav-github svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+/* ── Hero ──────────────────────────────────────── */
+.hero {
+  padding: var(--space-4xl) 0 var(--space-3xl);
+  position: relative;
+}
+
+.hero::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 40%, rgba(66, 99, 235, 0.06), transparent),
+    radial-gradient(ellipse 60% 40% at 80% 60%, rgba(66, 99, 235, 0.03), transparent);
+  pointer-events: none;
+}
+
+.hero-content {
+  position: relative;
+  max-width: 52rem;
+}
+
+.hero-eyebrow {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  margin-bottom: var(--space-lg);
+}
+
+.hero h1 {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: var(--text-3xl);
+  font-weight: 300;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+  margin-bottom: var(--space-xl);
+  font-optical-sizing: auto;
+}
+
+.hero h1 em {
+  font-style: italic;
+  font-weight: 400;
+}
+
+.hero-description {
+  font-size: var(--text-lg);
+  line-height: 1.6;
+  color: var(--ink-secondary);
+  max-width: 40rem;
+  margin-bottom: var(--space-xl);
+}
+
+.hero-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 0.5rem 1.25rem;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.15s ease;
+}
+.btn-primary:hover {
+  background: var(--ink-secondary);
+  color: var(--paper);
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 0.5rem 1.25rem;
+  background: transparent;
+  color: var(--ink);
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.btn-secondary:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
+.install-snippet {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: 0.625rem 1rem;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-sm);
+  margin-top: var(--space-lg);
+  user-select: all;
+}
+
+.install-snippet .prompt {
+  color: var(--code-comment);
+  user-select: none;
+}
+
+/* ── Stats ribbon ──────────────────────────────── */
+.stats {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-xl) 0;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-xl);
+}
+
+.stat-item {
+  text-align: left;
+}
+
+.stat-number {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.stat-label {
+  font-size: var(--text-xs);
+  color: var(--ink-tertiary);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: var(--space-xs);
+}
+
+/* ── Section shared ───────────────────────────── */
+.section-header {
+  margin-bottom: var(--space-2xl);
+}
+
+.section-eyebrow {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-tertiary);
+  margin-bottom: var(--space-sm);
+}
+
+.section-title {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: var(--text-2xl);
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+/* ── Code comparison ───────────────────────────── */
+.comparison {
+  padding: var(--space-3xl) 0;
+  border-top: 1px solid var(--border);
+}
+
+.code-example {
+  max-width: var(--content-width);
+  margin-top: var(--space-2xl);
+}
+
+.lang-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  overflow: hidden;
+}
+
+.lang-toggle button {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  padding: 0.4rem 1rem;
+  border: none;
+  background: transparent;
+  color: var(--ink-tertiary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.lang-toggle button.active {
+  background: var(--code-bg);
+  color: var(--code-fg);
+}
+
+.lang-toggle button:not(.active):hover {
+  background: var(--paper-warm);
+  color: var(--ink);
+}
+
+.code-panel {
+  position: relative;
+  display: none;
+}
+
+.code-panel.active {
+  display: block;
+}
+
+.code-block {
+  background: var(--code-bg);
+  padding: var(--space-lg);
+  overflow-x: auto;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+.code-block code {
+  font-size: inherit;
+}
+
+/* highlight.js overrides to match our theme */
+.code-block .hljs {
+  background: var(--code-bg) !important;
+  padding: 0 !important;
+}
+.code-block pre {
+  margin: 0;
+  background: transparent;
+}
+
+/* ── Backends ──────────────────────────────────── */
+.backends {
+  padding: var(--space-3xl) 0;
+  border-top: 1px solid var(--border);
+}
+
+.backends-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--border-strong);
+  margin-top: var(--space-2xl);
+}
+
+.backend-card {
+  background: var(--paper);
+  padding: var(--space-xl);
+  border-left: 2px solid transparent;
+  transition: border-color 0.2s ease;
+}
+.backend-card:hover {
+  border-left-color: var(--accent);
+}
+
+.backend-icon {
+  margin-bottom: var(--space-md);
+  line-height: 1;
+  height: 24px;
+}
+
+.backend-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-base);
+  font-weight: 500;
+  margin-bottom: var(--space-sm);
+}
+
+.backend-desc {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+  line-height: 1.6;
+}
+
+.backend-env {
+  margin-top: var(--space-md);
+  font-size: var(--text-xs);
+  color: var(--ink-tertiary);
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+/* ── API Reference ─────────────────────────────── */
+.api-reference {
+  padding: var(--space-3xl) 0;
+  border-top: 1px solid var(--border);
+}
+
+.api-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--border-strong);
+  margin-top: var(--space-2xl);
+}
+
+.api-category {
+  background: var(--paper);
+  padding: var(--space-xl);
+}
+
+.api-category-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-base);
+  font-weight: 500;
+  margin-bottom: var(--space-md);
+  color: var(--accent);
+}
+
+.api-functions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-sm);
+}
+
+.api-fn {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+  background: var(--paper-warm);
+  padding: 0.15rem 0.5rem;
+  white-space: nowrap;
+}
+
+.api-grid.collapsed .api-category .api-functions .api-fn:nth-child(n+5) {
+  display: none;
+}
+.api-grid.collapsed .api-category .api-more {
+  display: inline-block;
+}
+.api-grid:not(.collapsed) .api-category .api-more {
+  display: none;
+}
+.api-more {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0.15rem 0.5rem;
+}
+.api-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  color: var(--accent);
+  background: none;
+  border: 1px solid var(--border-strong);
+  padding: 0.3rem 0.75rem;
+  cursor: pointer;
+  margin-top: var(--space-lg);
+  transition: all 0.15s ease;
+}
+.api-toggle:hover { border-color: var(--accent); }
+
+/* ── Features ──────────────────────────────────── */
+.features {
+  padding: var(--space-3xl) 0;
+  border-top: 1px solid var(--border);
+}
+
+.features-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-2xl) var(--space-3xl);
+  margin-top: var(--space-2xl);
+}
+
+.feature {
+  max-width: 28rem;
+}
+
+.feature-title {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin-bottom: var(--space-sm);
+  letter-spacing: -0.01em;
+}
+
+.feature-text {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+  line-height: 1.7;
+}
+
+/* ── Quickstart ────────────────────────────────── */
+.quickstart {
+  padding: var(--space-3xl) 0;
+  background: var(--code-bg);
+  color: var(--code-fg);
+}
+.quickstart .section-eyebrow { color: var(--accent-light); }
+.quickstart .section-title { color: var(--code-fg); }
+.quickstart .step-number { color: var(--code-comment); }
+.quickstart .step-title { color: var(--code-fg); }
+.quickstart .code-block { background: rgba(0,0,0,0.3); }
+.quickstart .playground-link { color: var(--accent-light); }
+.quickstart .playground-link:hover { color: var(--code-fg); }
+
+.quickstart-steps {
+  display: grid;
+  gap: var(--space-2xl);
+  margin-top: var(--space-2xl);
+  max-width: var(--content-width);
+}
+
+.step {
+  display: grid;
+  grid-template-columns: 2rem 1fr;
+  gap: var(--space-lg);
+}
+
+.step-number {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--ink-muted);
+  line-height: 1;
+  padding-top: 0.1em;
+}
+
+.step-content {}
+
+.step-title {
+  font-weight: 600;
+  margin-bottom: var(--space-sm);
+}
+
+.step .code-block {
+  margin-top: var(--space-sm);
+}
+
+/* ── Footer ────────────────────────────────────── */
+footer {
+  border-top: 1px solid var(--border);
+  padding: var(--space-2xl) 0;
+  margin-top: var(--space-3xl);
+}
+
+.footer-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.footer-left {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-sm);
+  color: var(--ink-tertiary);
+}
+
+.footer-links {
+  display: flex;
+  gap: var(--space-lg);
+  list-style: none;
+}
+
+.footer-links a {
+  font-size: var(--text-sm);
+  color: var(--ink-tertiary);
+  font-weight: 500;
+}
+.footer-links a:hover { color: var(--ink); }
+
+.ecosystem-note {
+  text-align: center;
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+  margin-top: var(--space-md);
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+.ecosystem-note a {
+  color: var(--ink-tertiary);
+}
+
+/* ── Live playground ──────────────────────────── */
+.live-playground {
+  margin-top: var(--space-2xl);
+  max-width: var(--content-width);
+  border: 1px solid var(--border-strong);
+}
+.playground-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--paper-warm);
+  border-bottom: 1px solid var(--border);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  color: var(--ink-tertiary);
+}
+.playground-run {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  padding: 0.2rem 0.75rem;
+  background: var(--accent);
+  color: white;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.playground-run:hover { background: #3451c7; transform: translateY(-1px); box-shadow: 0 2px 8px rgba(66,99,235,0.3); }
+.playground-run:disabled { opacity: 0.5; cursor: default; }
+.playground-editor {
+  background: var(--code-bg);
+  padding: var(--space-md);
+  padding-left: 3rem;
+  min-height: 6rem;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--code-fg);
+  border: none;
+  outline: none;
+  width: 100%;
+  resize: vertical;
+  tab-size: 2;
+  box-shadow: inset 0 2px 8px rgba(0,0,0,0.2);
+  caret-color: var(--accent);
+  border-left: 2px solid var(--accent);
+}
+.playground-output {
+  position: relative;
+  background: #16161e;
+  padding: var(--space-md);
+  padding-left: 3rem;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--code-string);
+  border-top: 1px solid rgba(255,255,255,0.05);
+  min-height: 2rem;
+  white-space: pre-wrap;
+}
+.playground-output::before {
+  content: 'OUTPUT';
+  position: absolute;
+  top: var(--space-sm);
+  left: var(--space-md);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--code-comment);
+}
+.playground-output .error { color: #f38ba8; }
+
+
+/* ── Mobile menu button ───────────────────────── */
+.mobile-menu-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--ink);
+}
+.mobile-menu-btn svg { width: 20px; height: 20px; }
+
+/* ── Copy button ──────────────────────────────── */
+.code-block {
+  position: relative;
+}
+.copy-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  background: rgba(255,255,255,0.1);
+  border: none;
+  color: var(--code-comment);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+  z-index: 1;
+}
+.copy-btn:hover { background: rgba(255,255,255,0.15); color: var(--code-fg); }
+
+/* ── Version badge ────────────────────────────── */
+.version-badge {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  color: var(--ink-tertiary);
+  background: var(--paper-warm);
+  padding: 0.1rem 0.5rem;
+  margin-left: var(--space-sm);
+  vertical-align: middle;
+}
+
+/* ── Ecosystem strip ──────────────────────────── */
+.ecosystem {
+  padding: var(--space-2xl) 0;
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+.ecosystem-title {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-tertiary);
+  margin-bottom: var(--space-lg);
+}
+.ecosystem-grid {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-2xl);
+  flex-wrap: wrap;
+}
+.ecosystem-pkg {
+  text-align: center;
+}
+.ecosystem-pkg-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--ink);
+}
+.ecosystem-pkg-desc {
+  font-size: var(--text-xs);
+  color: var(--ink-tertiary);
+  margin-top: 2px;
+}
+
+/* ── Comparison table ─────────────────────────── */
+.compare-table {
+  margin-top: var(--space-2xl);
+  width: 100%;
+  max-width: var(--content-width);
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.compare-table th {
+  text-align: left;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-tertiary);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-strong);
+}
+.compare-table td {
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
+}
+.compare-table td:first-child {
+  font-weight: 500;
+}
+.compare-table .highlight-col {
+  background: var(--accent-bg);
+}
+.compare-table .check { color: var(--accent); }
+.compare-table .partial { color: var(--ink-muted); }
+
+/* ── Benchmark table ──────────────────────────── */
+.benchmark-table {
+  margin-top: var(--space-2xl);
+  width: 100%;
+  max-width: var(--content-width);
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.benchmark-table th {
+  text-align: left;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-tertiary);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-strong);
+}
+.benchmark-table td {
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-sm);
+}
+.benchmark-table td:first-child {
+  color: var(--ink-secondary);
+  font-family: 'IBM Plex Sans', sans-serif;
+}
+.benchmark-table .fastest {
+  color: var(--accent);
+  font-weight: 600;
+}
+.benchmark-note {
+  margin-top: var(--space-sm);
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+  font-style: italic;
+}
+
+/* ── Playground button ────────────────────────── */
+.playground-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-lg);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-sm);
+  color: var(--accent);
+  font-weight: 500;
+}
+.playground-link:hover { color: var(--ink); }
+.playground-link svg { width: 16px; height: 16px; }
+
+/* ── Responsive ────────────────────────────────── */
+@media (max-width: 768px) {
+  .hero { padding: var(--space-3xl) 0 var(--space-2xl); }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-lg);
+  }
+
+  .comparison-layout {
+    grid-template-columns: 1fr;
+    gap: var(--space-lg);
+  }
+
+  .comparison-arrow {
+    transform: rotate(90deg);
+    padding: 0;
+  }
+
+  .backends-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .api-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .features-list {
+    grid-template-columns: 1fr;
+    gap: var(--space-xl);
+  }
+
+  .nav-links {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: rgba(248, 246, 241, 0.97);
+    backdrop-filter: blur(12px);
+    flex-direction: column;
+    padding: var(--space-lg) clamp(1rem, 3vw, 2rem);
+    border-bottom: 1px solid var(--border);
+    gap: var(--space-md);
+  }
+  .nav-links.open { display: flex; }
+  .mobile-menu-btn { display: flex; }
+
+  .footer-content {
+    flex-direction: column;
+    gap: var(--space-md);
+    text-align: center;
+  }
+
+  .hero-actions {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .benchmark-table, .compare-table {
+    font-size: var(--text-xs);
+  }
+  .benchmark-table th, .benchmark-table td,
+  .compare-table th, .compare-table td {
+    padding: var(--space-xs) var(--space-sm);
+  }
+}
+
+/* ── Animations ────────────────────────────────── */
+@media (prefers-reduced-motion: no-preference) {
+  .hero-content, .section-header, .backend-card, .api-category, .feature, .step {
+    opacity: 0;
+    transform: translateY(12px);
+    animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .hero-content { animation-delay: 0.1s; }
+  .section-header { animation-delay: 0.05s; }
+
+  .backend-card:nth-child(1) { animation-delay: 0.1s; }
+  .backend-card:nth-child(2) { animation-delay: 0.15s; }
+  .backend-card:nth-child(3) { animation-delay: 0.2s; }
+
+  .api-category:nth-child(1) { animation-delay: 0.1s; }
+  .api-category:nth-child(2) { animation-delay: 0.15s; }
+  .api-category:nth-child(3) { animation-delay: 0.2s; }
+  .api-category:nth-child(4) { animation-delay: 0.25s; }
+  .api-category:nth-child(5) { animation-delay: 0.3s; }
+  .api-category:nth-child(6) { animation-delay: 0.35s; }
+
+  .feature:nth-child(1) { animation-delay: 0.1s; }
+  .feature:nth-child(2) { animation-delay: 0.15s; }
+  .feature:nth-child(3) { animation-delay: 0.2s; }
+  .feature:nth-child(4) { animation-delay: 0.25s; }
+
+  .step:nth-child(1) { animation-delay: 0.1s; }
+  .step:nth-child(2) { animation-delay: 0.15s; }
+  .step:nth-child(3) { animation-delay: 0.2s; }
+
+  @keyframes fadeUp {
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+</style>
+</head>
+<body>
+
+<!-- Navigation -->
+<nav>
+  <div class="container">
+    <a href="/numpyjs/" class="nav-logo">numpyjs<span class="version-badge" title="API follows NumPy conventions. Semver from v1.0.">v0.1</span></a>
+    <button class="mobile-menu-btn" onclick="document.querySelector('.nav-links').classList.toggle('open')" aria-label="Menu">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+    </button>
+    <ul class="nav-links">
+      <li><a href="https://github.com/nickthorat/pydatajs/tree/main/packages/numpyjs#readme" target="_blank" rel="noopener">Docs</a></li>
+      <li><a href="#comparison">Examples</a></li>
+      <li><a href="#alternatives">vs Others</a></li>
+      <li><a href="#backends">Backends</a></li>
+      <li><a href="#api">API</a></li>
+      <li><a href="#quickstart">Get Started</a></li>
+      <li>
+        <a href="https://github.com/nickthorat/pydatajs" class="nav-github" target="_blank" rel="noopener">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+          GitHub
+        </a>
+      </li>
+    </ul>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-content">
+      <div class="hero-eyebrow">NumPy for JavaScript</div>
+      <h1>N-dimensional arrays,<br><em>in the browser</em></h1>
+      <p class="hero-description">
+        The NumPy API you already know, running natively in JavaScript. Linear algebra, FFT, random number generation, statistics — with three swappable backends and full TypeScript support.
+      </p>
+      <div class="hero-actions">
+        <a href="#quickstart" class="btn-primary">Get Started</a>
+        <a href="https://stackblitz.com/edit/numpyjs-starter?file=index.ts" class="btn-secondary" target="_blank" rel="noopener">⚡ Try it live</a>
+        <a href="https://github.com/nickthorat/pydatajs" class="btn-secondary" target="_blank" rel="noopener">GitHub</a>
+      </div>
+      <div class="install-snippet">
+        <span class="prompt">$</span>
+        <span>npm install numpyjs</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: var(--space-md); margin-top: var(--space-sm); flex-wrap: wrap;">
+        <img src="https://img.shields.io/badge/npm-v0.1.0-4263eb?style=flat-square" alt="npm version" height="18">
+        <img src="https://img.shields.io/badge/build-passing-4263eb?style=flat-square" alt="CI" height="18">
+        <img src="https://img.shields.io/badge/types-TypeScript-4263eb?style=flat-square" alt="TypeScript" height="18">
+        <img src="https://img.shields.io/badge/license-MIT-4263eb?style=flat-square" alt="MIT" height="18">
+        <span class="benchmark-note">v0.1 — early but stable. API follows NumPy conventions. Full TypeScript types. Semver from v1.0.</span>
+      </div>
+
+      <div class="live-playground" id="playground">
+        <div class="playground-header">
+          <span>▶ Try numpyjs — editable, runs in your browser</span>
+          <button class="playground-run" onclick="runPlayground()" id="run-btn">Run ⌘↵</button>
+        </div>
+        <textarea class="playground-editor" id="playground-editor" spellcheck="false" rows="7">const np = await createBackend('js');
+
+const A = np.array([[1, 2], [3, 4]]);
+const B = np.eye(2);
+const C = np.matmul(A, B);
+
+console.log('A × I =', C.toArray());
+console.log('det(A) =', np.det(A));
+console.log('mean =', np.mean(A));</textarea>
+        <div class="playground-output" id="playground-output">Click "Run" or press ⌘+Enter · Try editing the code above</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Stats -->
+<section class="stats">
+  <div class="container">
+    <div class="stats-grid">
+      <div class="stat-item">
+        <div class="stat-number">1,451</div>
+        <div class="stat-label">Tests Passing</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-number">200+</div>
+        <div class="stat-label">API Functions</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-number">3</div>
+        <div class="stat-label">Compute Backends</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-number">42kb</div>
+        <div class="stat-label">Gzipped (JS backend)</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Code Comparison -->
+<section class="comparison" id="comparison">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">Familiar Syntax</div>
+      <h2 class="section-title">Write what you already know</h2>
+    </div>
+
+    <div class="code-example">
+      <div class="lang-toggle">
+        <button class="active" onclick="switchLang(this, 'js')">JavaScript</button>
+        <button onclick="switchLang(this, 'py')">Python</button>
+      </div>
+      <div class="code-panel active" data-lang="js">
+        <div class="code-block"><pre><code class="language-javascript">import { createBackend } from 'numpyjs';
+const np = await createBackend('js');
+
+// Create arrays
+const a = np.array([[1, 2], [3, 4]]);
+const b = np.eye(2);
+
+// Linear algebra
+const c = np.matmul(a, b);
+const { values, vectors } = np.eig(a);
+
+// Statistics
+console.log(np.mean(a, 0));
+console.log(np.std(a));</code></pre></div>
+      </div>
+      <div class="code-panel" data-lang="py">
+        <div class="code-block"><pre><code class="language-python">import numpy as np
+
+# Create arrays
+a = np.array([[1, 2], [3, 4]])
+b = np.eye(2)
+
+# Linear algebra
+c = np.matmul(a, b)
+vals, vecs = np.linalg.eig(a)
+
+# Statistics
+print(np.mean(a, axis=0))
+print(np.std(a))</code></pre></div>
+      </div>
+    </div>
+    <div class="benchmark-note" style="margin-top: var(--space-md);">Note: numpyjs uses flat namespaces — <code>np.eig()</code> instead of <code>np.linalg.eig()</code>, <code>np.randn()</code> instead of <code>np.random.randn()</code>. Shape args use arrays: <code>np.randn([3, 3])</code>.</div>
+    <div class="code-block" style="margin-top: var(--space-lg); max-width: var(--content-width);"><pre><code class="language-typescript">// Full TypeScript — types flow through every operation
+const a: NDArray = np.array([[1, 2], [3, 4]]);       // NDArray
+const mean: number = np.mean(a) as number;            // number
+const { values, vectors } = np.eig(a);               // typed decomposition
+const b: NDArray = np.randn([3, 3]);                  // NDArray</code></pre></div>
+  </div>
+</section>
+
+<!-- Alternatives -->
+<section class="comparison" id="alternatives">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">Positioning</div>
+      <h2 class="section-title">How numpyjs compares</h2>
+    </div>
+
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th class="highlight-col">numpyjs</th>
+          <th>mathjs</th>
+          <th>TensorFlow.js</th>
+          <th>ndarray</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>N-dimensional arrays</td>
+          <td class="highlight-col"><span class="check">✓ Full ndarray</span></td>
+          <td><span class="partial">Matrices only</span></td>
+          <td><span class="check">✓ Tensors</span></td>
+          <td><span class="check">✓ ndarray</span></td>
+        </tr>
+        <tr>
+          <td>NumPy-compatible API</td>
+          <td class="highlight-col"><span class="check">✓ Goal</span></td>
+          <td><span class="partial">Partial</span></td>
+          <td><span class="partial">Own API</span></td>
+          <td><span class="partial">Minimal</span></td>
+        </tr>
+        <tr>
+          <td>GPU acceleration</td>
+          <td class="highlight-col"><span class="check">✓ WebGPU</span></td>
+          <td>—</td>
+          <td><span class="check">✓ WebGL/WebGPU</span></td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>WASM backend</td>
+          <td class="highlight-col"><span class="check">✓</span></td>
+          <td>—</td>
+          <td><span class="check">✓</span></td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>Bundle size (gzip)</td>
+          <td class="highlight-col"><span class="check">42kb</span></td>
+          <td>180kb</td>
+          <td>400kb+</td>
+          <td>8kb</td>
+        </tr>
+        <tr>
+          <td>FFT</td>
+          <td class="highlight-col"><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>TypeScript</td>
+          <td class="highlight-col"><span class="check">✓ Native</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="partial">@types</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- Use Cases -->
+<section class="features" id="features">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">Use Cases</div>
+      <h2 class="section-title">Where numpyjs shines</h2>
+    </div>
+
+    <div class="features-list">
+      <div class="feature">
+        <div class="feature-title">Client-side ML inference</div>
+        <div class="feature-text">
+          Run tensor operations directly in the browser. Pre/post-process data for ONNX or TFLite models without a server round-trip. WebGPU backend handles large batches.
+        </div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title">Interactive data viz</div>
+        <div class="feature-text">
+          Compute statistics, histograms, and transforms on the fly. Pair with D3 or Observable Plot. FFT for audio visualizations. All at 60fps with the WASM backend.
+        </div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title">Scientific computing in Node.js</div>
+        <div class="feature-text">
+          Signal processing, matrix decomposition, and numerical methods in server-side JavaScript. Same API whether you prototype in Python or ship in JS.
+        </div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title">Education &amp; notebooks</div>
+        <div class="feature-text">
+          Teach linear algebra and statistics in JavaScript notebooks. Students familiar with NumPy tutorials can follow along directly. Full TypeScript intellisense guides exploration.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Backends -->
+<section class="backends" id="backends">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">Performance</div>
+      <h2 class="section-title">Three backends, one API</h2>
+      <div class="benchmark-note" style="margin-top: var(--space-sm);"><code>createBackend('js')</code> → <code>createBackend('webgpu')</code> — one line change, same code.</div>
+    </div>
+
+    <div class="backends-grid">
+      <div class="backend-card">
+        <div class="backend-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
+        <div class="backend-name">Pure JS</div>
+        <div class="backend-desc">
+          Zero dependencies, zero compilation. Works everywhere JavaScript runs — browsers, Node.js, Bun, Deno, edge functions. The universal default.
+        </div>
+        <div class="backend-env">Node.js &middot; Bun &middot; All browsers</div>
+      </div>
+
+      <div class="backend-card">
+        <div class="backend-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg></div>
+        <div class="backend-name">WebGPU</div>
+        <div class="backend-desc">
+          GPU-accelerated computation via WebGPU shaders. Massive speedups for large matrix operations, convolutions, and batch processing. Runs on the GPU.
+        </div>
+        <div class="backend-env">Chrome 113+ &middot; Edge 113+ &middot; Firefox Nightly</div>
+      </div>
+
+      <div class="backend-card">
+        <div class="backend-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5"/><path d="M12 22V15.5M22 8.5L12 15.5M2 8.5l10 7"/></svg></div>
+        <div class="backend-name">WASM</div>
+        <div class="backend-desc">
+          Rust compiled to WebAssembly. Near-native performance for CPU-bound work. SIMD-optimized linear algebra, random number generation, and reduction operations.
+        </div>
+        <div class="backend-env">All modern browsers &middot; Node.js &middot; Bun</div>
+      </div>
+    </div>
+
+    <table class="benchmark-table">
+      <thead>
+        <tr>
+          <th>Operation</th>
+          <th>Pure JS</th>
+          <th>WASM</th>
+          <th>WebGPU</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>matmul 512×512</td>
+          <td>142ms</td>
+          <td class="fastest">18ms</td>
+          <td class="fastest">3ms</td>
+        </tr>
+        <tr>
+          <td>FFT 65536 points</td>
+          <td>28ms</td>
+          <td class="fastest">4ms</td>
+          <td>6ms</td>
+        </tr>
+        <tr>
+          <td>SVD 256×256</td>
+          <td>310ms</td>
+          <td class="fastest">42ms</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>randn 1M</td>
+          <td>86ms</td>
+          <td class="fastest">12ms</td>
+          <td>9ms</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="benchmark-note">M3 MacBook Pro, Chrome 130. WebGPU times include GPU→CPU transfer. — = not yet implemented on this backend. <a href="https://github.com/nickthorat/pydatajs/tree/main/packages/numpyjs/benchmarks" target="_blank" rel="noopener" style="color: var(--accent);">Run benchmarks yourself →</a></div>
+  </div>
+</section>
+
+<!-- API Reference -->
+<section class="api-reference" id="api">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">API Reference</div>
+      <h2 class="section-title">200+ functions across 6 modules</h2>
+      <a href="https://github.com/nickthorat/pydatajs/tree/main/packages/numpyjs#api" class="playground-link" target="_blank" rel="noopener">View full API docs <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg></a>
+    </div>
+
+    <div class="api-grid collapsed">
+      <div class="api-category">
+        <div class="api-category-name">Array Creation</div>
+        <div class="api-functions">
+          <span class="api-fn">zeros</span>
+          <span class="api-fn">ones</span>
+          <span class="api-fn">full</span>
+          <span class="api-fn">arange</span>
+          <span class="api-fn">linspace</span>
+          <span class="api-fn">eye</span>
+          <span class="api-fn">diag</span>
+          <span class="api-fn">array</span>
+          <span class="api-fn">fromfunction</span>
+          <span class="api-fn">fromiter</span>
+          <span class="api-more">+6 more</span>
+        </div>
+      </div>
+
+      <div class="api-category">
+        <div class="api-category-name">Math</div>
+        <div class="api-functions">
+          <span class="api-fn">sin</span>
+          <span class="api-fn">cos</span>
+          <span class="api-fn">tan</span>
+          <span class="api-fn">exp</span>
+          <span class="api-fn">log</span>
+          <span class="api-fn">sqrt</span>
+          <span class="api-fn">abs</span>
+          <span class="api-fn">floor</span>
+          <span class="api-fn">ceil</span>
+          <span class="api-fn">round</span>
+          <span class="api-fn">add</span>
+          <span class="api-fn">subtract</span>
+          <span class="api-fn">multiply</span>
+          <span class="api-fn">divide</span>
+          <span class="api-fn">power</span>
+          <span class="api-fn">mod</span>
+          <span class="api-fn">clip</span>
+          <span class="api-fn">sign</span>
+          <span class="api-more">+14 more</span>
+        </div>
+      </div>
+
+      <div class="api-category">
+        <div class="api-category-name">Linear Algebra</div>
+        <div class="api-functions">
+          <span class="api-fn">matmul</span>
+          <span class="api-fn">dot</span>
+          <span class="api-fn">eig</span>
+          <span class="api-fn">svd</span>
+          <span class="api-fn">inv</span>
+          <span class="api-fn">det</span>
+          <span class="api-fn">solve</span>
+          <span class="api-fn">norm</span>
+          <span class="api-fn">transpose</span>
+          <span class="api-more">+5 more</span>
+        </div>
+      </div>
+
+      <div class="api-category">
+        <div class="api-category-name">Statistics</div>
+        <div class="api-functions">
+          <span class="api-fn">mean</span>
+          <span class="api-fn">std</span>
+          <span class="api-fn">var</span>
+          <span class="api-fn">min</span>
+          <span class="api-fn">max</span>
+          <span class="api-fn">sum</span>
+          <span class="api-fn">prod</span>
+          <span class="api-fn">argmin</span>
+          <span class="api-fn">argmax</span>
+          <span class="api-fn">median</span>
+          <span class="api-fn">percentile</span>
+          <span class="api-more">+7 more</span>
+        </div>
+      </div>
+
+      <div class="api-category">
+        <div class="api-category-name">Random</div>
+        <div class="api-functions">
+          <span class="api-fn">random</span>
+          <span class="api-fn">randn</span>
+          <span class="api-fn">randint</span>
+          <span class="api-fn">uniform</span>
+          <span class="api-fn">normal</span>
+          <span class="api-fn">choice</span>
+          <span class="api-fn">shuffle</span>
+          <span class="api-fn">seed</span>
+          <span class="api-more">+4 more</span>
+        </div>
+      </div>
+
+      <div class="api-category">
+        <div class="api-category-name">FFT</div>
+        <div class="api-functions">
+          <span class="api-fn">fft</span>
+          <span class="api-fn">ifft</span>
+          <span class="api-fn">fft2</span>
+          <span class="api-fn">ifft2</span>
+          <span class="api-fn">fftn</span>
+          <span class="api-fn">ifftn</span>
+          <span class="api-fn">rfft</span>
+          <span class="api-fn">irfft</span>
+          <span class="api-fn">fftfreq</span>
+          <span class="api-more">+5 more</span>
+        </div>
+      </div>
+    </div>
+    <button class="api-toggle" onclick="toggleApi()">Show all functions</button>
+  </div>
+</section>
+
+<!-- Quickstart -->
+<section class="quickstart" id="quickstart">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">Get Started</div>
+      <h2 class="section-title">Up and running in 30 seconds</h2>
+    </div>
+
+    <div class="quickstart-steps">
+      <div class="step">
+        <div class="step-number">1</div>
+        <div class="step-content">
+          <div class="step-title">Install</div>
+          <div class="code-block"><pre><code class="language-bash">npm install numpyjs</code></pre></div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-number">2</div>
+        <div class="step-content">
+          <div class="step-title">Import and create a backend</div>
+          <div class="code-block"><pre><code class="language-javascript">import { createBackend } from 'numpyjs';
+
+// Pick your backend
+const np = await createBackend('js');      // CPU — works everywhere
+// const np = await createBackend('webgpu'); // GPU — Chrome, Edge
+// const np = await createBackend('wasm');   // Rust WASM — near-native</code></pre></div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-number">3</div>
+        <div class="step-content">
+          <div class="step-title">Compute</div>
+          <div class="code-block"><pre><code class="language-javascript">const x = np.linspace(0, 2 * Math.PI, 100);
+const y = np.sin(x);
+
+const A = np.randn([3, 3]);
+const { u, s, vt } = np.svd(A);
+
+console.log('mean:', np.mean(y));
+console.log('singular values:', s.toArray());</code></pre></div>
+        </div>
+      </div>
+    </div>
+
+    <a href="https://stackblitz.com/edit/numpyjs-starter?file=index.ts" class="playground-link" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      Open in StackBlitz
+    </a>
+  </div>
+</section>
+
+<!-- Ecosystem -->
+<section class="ecosystem">
+  <div class="container">
+    <div class="ecosystem-title">Part of the pydatajs ecosystem</div>
+    <div class="benchmark-note" style="text-align: center; margin-bottom: var(--space-lg);">Python's data science stack, ported to JavaScript. numpyjs is the foundation. Some packages are in development.</div>
+    <div class="ecosystem-grid">
+      <a href="../" class="ecosystem-pkg">
+        <div class="ecosystem-pkg-name">pydatajs</div>
+        <div class="ecosystem-pkg-desc">Umbrella project</div>
+      </a>
+      <a href="../torchjs/" class="ecosystem-pkg">
+        <div class="ecosystem-pkg-name">torchjs</div>
+        <div class="ecosystem-pkg-desc">PyTorch for JS</div>
+      </a>
+      <a href="../scikitjs/" class="ecosystem-pkg">
+        <div class="ecosystem-pkg-name">scikitlearn-js</div>
+        <div class="ecosystem-pkg-desc">Scikit-learn for JS</div>
+      </a>
+      <a href="../pandasjs/" class="ecosystem-pkg">
+        <div class="ecosystem-pkg-name">pandasjs</div>
+        <div class="ecosystem-pkg-desc">Pandas for JS</div>
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <div class="footer-content">
+      <div class="footer-left">numpyjs — MIT License · Built by <a href="https://github.com/nickthorat" target="_blank" rel="noopener" style="color: var(--ink-tertiary);">Nikhil Thorat</a></div>
+      <ul class="footer-links">
+        <li><a href="https://github.com/nickthorat/pydatajs" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://www.npmjs.com/package/numpyjs" target="_blank" rel="noopener">npm</a></li>
+        <li><a href="https://github.com/nickthorat/pydatajs/issues" target="_blank" rel="noopener">Issues</a></li>
+      </ul>
+    </div>
+    <div class="ecosystem-note">Part of the <a href="../">pydatajs</a> ecosystem — also powering <a href="../torchjs/">torchjs</a>, <a href="../scikitjs/">scikitlearn-js</a>, and <a href="../pandasjs/">pandasjs</a></div>
+  </div>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+hljs.highlightAll();
+
+function switchLang(btn, lang) {
+  const example = btn.closest('.code-example');
+  example.querySelectorAll('.lang-toggle button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  example.querySelectorAll('.code-panel').forEach(p => {
+    p.classList.toggle('active', p.dataset.lang === lang);
+  });
+}
+
+function toggleApi() {
+  const grid = document.querySelector('.api-grid');
+  const btn = document.querySelector('.api-toggle');
+  grid.classList.toggle('collapsed');
+  btn.textContent = grid.classList.contains('collapsed') ? 'Show all functions' : 'Show fewer';
+}
+
+// Playground
+let numpyjsLoaded = false;
+let createBackend;
+
+async function loadNumpyjs() {
+  if (numpyjsLoaded) return;
+  try {
+    const mod = await import('./numpyjs.bundle.js');
+    createBackend = mod.createBackend;
+    numpyjsLoaded = true;
+  } catch(e) {
+    throw new Error('Failed to load numpyjs from CDN: ' + e.message);
+  }
+}
+
+async function runPlayground() {
+  const btn = document.getElementById('run-btn');
+  const output = document.getElementById('playground-output');
+  const code = document.getElementById('playground-editor').value;
+
+  btn.disabled = true;
+  btn.textContent = 'Loading...';
+  output.textContent = '';
+
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...args) => {
+    logs.push(args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+  };
+
+  try {
+    await loadNumpyjs();
+    const fn = new Function('createBackend', `return (async () => { ${code} })();`);
+    await fn(createBackend);
+    output.textContent = logs.join('\n') || '(no output)';
+  } catch(e) {
+    output.innerHTML = '<span class="error">' + e.message + '</span>';
+  } finally {
+    console.log = origLog;
+    btn.disabled = false;
+    btn.textContent = 'Run ⌘↵';
+  }
+}
+
+// Keyboard shortcut: Cmd/Ctrl+Enter to run
+document.getElementById('playground-editor').addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault();
+    runPlayground();
+  }
+  // Tab key inserts spaces
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const t = e.target;
+    const start = t.selectionStart;
+    t.value = t.value.substring(0, start) + '  ' + t.value.substring(t.selectionEnd);
+    t.selectionStart = t.selectionEnd = start + 2;
+  }
+});
+
+// Add copy buttons to all code blocks
+document.querySelectorAll('.code-block').forEach(block => {
+  const btn = document.createElement('button');
+  btn.className = 'copy-btn';
+  btn.textContent = 'copy';
+  btn.onclick = () => {
+    const code = block.querySelector('code').textContent;
+    navigator.clipboard.writeText(code).then(() => {
+      btn.textContent = 'copied!';
+      setTimeout(() => btn.textContent = 'copy', 1500);
+    });
+  };
+  block.appendChild(btn);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>torchjs WebGPU Ops Correctness Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      background: #1a1a1a;
+      color: #e0e0e0;
+      padding: 20px;
+    }
+    .pass { color: #4CAF50; }
+    .fail { color: #f44336; }
+    pre { background: #333; padding: 10px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>WebGPU Ops Correctness Test</h1>
+  <pre id="log"></pre>
+
+  <script type="module">
+    import { nn, setBackend, getBackend, createWebGPUBackend, tensor } from '../dist/index.js';
+
+    const log = document.getElementById('log');
+    function print(msg, isPass) {
+      const span = document.createElement('span');
+      if (isPass !== undefined) {
+        span.className = isPass ? 'pass' : 'fail';
+      }
+      span.textContent = msg + '\n';
+      log.appendChild(span);
+    }
+
+    function arraysClose(a, b, tol = 1e-5) {
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        if (Math.abs(a[i] - b[i]) > tol) return false;
+      }
+      return true;
+    }
+
+    async function runTests() {
+      print('Initializing WebGPU...');
+      const webgpu = await createWebGPUBackend();
+      print('WebGPU initialized!\n');
+
+      let passed = 0;
+      let failed = 0;
+
+      async function test(name, fn) {
+        try {
+          const result = await fn();
+          if (result) {
+            print(`✓ ${name}`, true);
+            passed++;
+          } else {
+            print(`✗ ${name} - values mismatch`, false);
+            failed++;
+          }
+        } catch (e) {
+          print(`✗ ${name} - ${e.message}`, false);
+          failed++;
+        }
+      }
+
+      // Test ReLU
+      await test('relu', async () => {
+        const input = tensor([-1, 0, 1, 2], [2, 2]);
+        const jsOut = nn.relu(input);
+        print(`  Input: [${Array.from(input.data).join(', ')}]`);
+        print(`  JS result: [${Array.from(jsOut.data).join(', ')}]`);
+
+        const gpuOut = webgpu.relu(input);
+        print(`  GPU tensor shape: ${gpuOut.shape}`);
+        print(`  GPU tensor type: ${gpuOut.constructor.name}`);
+
+        const gpuData = await gpuOut.getData();
+        print(`  GPU result: [${Array.from(gpuData).join(', ')}]`);
+        return arraysClose(jsOut.data, gpuData);
+      });
+
+      // Test Sigmoid
+      await test('sigmoid', async () => {
+        const input = tensor([0, 1, -1, 10], [2, 2]);
+        const jsOut = nn.sigmoid(input);
+        const gpuOut = webgpu.sigmoid(input);
+        await gpuOut.getData();
+        return arraysClose(jsOut.data, gpuOut.data);
+      });
+
+      // Test Conv2d
+      await test('conv2d 3x3', async () => {
+        const input = tensor(Array(16).fill(1), [1, 1, 4, 4]);
+        const weight = tensor(Array(9).fill(1), [1, 1, 3, 3]);
+        const bias = tensor([0], [1]);
+        const jsOut = nn.conv2d(input, weight, bias, [1, 1], [0, 0]);
+        const gpuOut = webgpu.conv2d(input, weight, bias, [1, 1], [0, 0]);
+        await gpuOut.getData();
+        return arraysClose(jsOut.data, gpuOut.data);
+      });
+
+      // Test MaxPool2d
+      await test('maxPool2d', async () => {
+        const input = tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], [1, 1, 4, 4]);
+        const jsOut = nn.maxPool2d(input, [2, 2], [2, 2], [0, 0]);
+        const gpuOut = webgpu.maxPool2d(input, [2, 2], [2, 2], [0, 0]);
+        await gpuOut.getData();
+        return arraysClose(jsOut.data, gpuOut.data);
+      });
+
+      // Test Bilinear Resize
+      await test('resizeBilinear 2x2->4x4', async () => {
+        const input = tensor([1, 2, 3, 4], [1, 1, 2, 2]);
+        const jsOut = nn.resizeBilinear(input, [4, 4]);
+        const gpuOut = webgpu.resizeBilinear(input, [4, 4]);
+        await gpuOut.getData();
+        print(`  JS:  [${Array.from(jsOut.data).map(x => x.toFixed(4)).join(', ')}]`);
+        print(`  GPU: [${Array.from(gpuOut.data).map(x => x.toFixed(4)).join(', ')}]`);
+        return arraysClose(jsOut.data, gpuOut.data);
+      });
+
+      // Test UpsampleBilinear
+      await test('upsampleBilinear scale=2', async () => {
+        const input = tensor([1, 2, 3, 4], [1, 1, 2, 2]);
+        const jsOut = nn.upsampleBilinear(input, 2);
+        const gpuOut = webgpu.upsampleBilinear(input, 2);
+        await gpuOut.getData();
+        return arraysClose(jsOut.data, gpuOut.data);
+      });
+
+      // Test DepthwiseConv2d
+      await test('depthwiseConv2d', async () => {
+        const input = tensor(Array(64).fill(1), [1, 4, 4, 4]);
+        const weight = tensor(Array(36).fill(1), [4, 1, 3, 3]);
+        const bias = tensor([0, 0, 0, 0], [4]);
+        const jsOut = nn.depthwiseConv2d(input, weight, bias, [1, 1], [1, 1]);
+        const gpuOut = webgpu.depthwiseConv2d(input, weight, bias, [1, 1], [1, 1]);
+        await gpuOut.getData();
+        return arraysClose(jsOut.data, gpuOut.data);
+      });
+
+      // Test MulScalar
+      await test('mulScalar', async () => {
+        const input = tensor([1, 2, 3, 4], [2, 2]);
+        const jsOut = nn.mulScalar(input, 0.5);
+        const gpuOut = webgpu.mulScalar(input, 0.5);
+        await gpuOut.getData();
+        return arraysClose(jsOut.data, gpuOut.data);
+      });
+
+      // Test Add
+      await test('add', async () => {
+        const a = tensor([1, 2, 3, 4], [2, 2]);
+        const b = tensor([10, 20, 30, 40], [2, 2]);
+        const jsOut = nn.add(a, b);
+        const gpuOut = webgpu.add(a, b);
+        await gpuOut.getData();
+        return arraysClose(jsOut.data, gpuOut.data);
+      });
+
+      print(`\n=== Results ===`);
+      print(`Passed: ${passed}`, passed > 0);
+      print(`Failed: ${failed}`, failed === 0);
+    }
+
+    runTests().catch(e => print(`Error: ${e.message}`, false));
+  </script>
+</body>
+</html>

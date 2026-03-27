@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pydatajs — PyData for JavaScript</title>
+<meta name="description" content="High-performance scientific computing and machine learning in JavaScript. NumPy, scikit-learn, PyTorch — running natively in the browser and Node.js.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,600;0,9..144,700;0,9..144,800;1,9..144,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ── Reset ─────────────────────────────────────── */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* ── Tokens ────────────────────────────────────── */
+:root {
+  /* surfaces */
+  --paper: #f8f6f1;
+  --paper-warm: #f3f0e8;
+  --ink: #1c1c28;
+  --ink-secondary: #4a4a5a;
+  --ink-tertiary: #7a7a8a;
+  --ink-muted: #a0a0ae;
+
+  /* accent — a warm, deep amber inspired by iron-gall ink */
+  --accent: #c2410c;
+  --accent-light: #fed7aa;
+  --accent-bg: #fff7ed;
+
+  /* package colors — inspired by their Python counterparts */
+  --numpy-blue: #4263eb;
+  --sklearn-orange: #e8590c;
+  --torch-red: #dc2626;
+  --scipy-teal: #0d9488;
+  --pandas-navy: #1e3a5f;
+
+  /* code */
+  --code-bg: #1e1e2e;
+  --code-fg: #cdd6f4;
+  --code-comment: #6c7086;
+  --code-keyword: #cba6f7;
+  --code-string: #a6e3a1;
+  --code-func: #89b4fa;
+  --code-type: #f9e2af;
+  --code-number: #fab387;
+  --code-operator: #89dceb;
+  --code-punctuation: #9399b2;
+
+  /* borders */
+  --border: rgba(28, 28, 40, 0.1);
+  --border-strong: rgba(28, 28, 40, 0.2);
+
+  /* spacing */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+  --space-4xl: 10rem;
+
+  /* type scale */
+  --text-xs: clamp(0.75rem, 0.7rem + 0.2vw, 0.8125rem);
+  --text-sm: clamp(0.8125rem, 0.78rem + 0.2vw, 0.875rem);
+  --text-base: clamp(0.9375rem, 0.88rem + 0.3vw, 1.0625rem);
+  --text-lg: clamp(1.125rem, 1rem + 0.5vw, 1.25rem);
+  --text-xl: clamp(1.5rem, 1.2rem + 1vw, 2rem);
+  --text-2xl: clamp(2rem, 1.5rem + 2vw, 3rem);
+  --text-3xl: clamp(2.5rem, 1.8rem + 3vw, 4.5rem);
+
+  /* layout */
+  --max-width: 72rem;
+  --content-width: 56rem;
+}
+
+/* ── Base ──────────────────────────────────────── */
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'IBM Plex Sans', -apple-system, sans-serif;
+  font-size: var(--text-base);
+  line-height: 1.65;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+a:hover { color: var(--ink); }
+
+code {
+  font-family: 'IBM Plex Mono', 'SF Mono', 'Consolas', monospace;
+  font-size: 0.9em;
+}
+
+/* ── Layout ────────────────────────────────────── */
+.container {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 0 clamp(1.5rem, 4vw, 3rem);
+}
+
+.narrow {
+  max-width: var(--content-width);
+}
+
+/* ── Navigation ────────────────────────────────── */
+nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(248, 246, 241, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-md) 0;
+}
+
+nav .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.nav-logo {
+  font-family: 'IBM Plex Mono', monospace;
+  font-weight: 500;
+  font-size: var(--text-lg);
+  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+
+.nav-links {
+  display: flex;
+  gap: var(--space-lg);
+  list-style: none;
+}
+
+.nav-links a {
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.nav-links a:hover { color: var(--ink); }
+
+.nav-github {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.nav-github svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+/* ── Hero ──────────────────────────────────────── */
+.hero {
+  padding: var(--space-4xl) 0 var(--space-3xl);
+  position: relative;
+}
+
+.hero::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 40%, rgba(66, 99, 235, 0.04), transparent),
+    radial-gradient(ellipse 60% 40% at 80% 60%, rgba(194, 65, 12, 0.03), transparent);
+  pointer-events: none;
+}
+
+.hero-content {
+  position: relative;
+  max-width: 52rem;
+}
+
+.hero-eyebrow {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  margin-bottom: var(--space-lg);
+}
+
+.hero h1 {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: var(--text-3xl);
+  font-weight: 300;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+  margin-bottom: var(--space-xl);
+  font-optical-sizing: auto;
+}
+
+.hero h1 em {
+  font-style: italic;
+  font-weight: 400;
+}
+
+.hero-description {
+  font-size: var(--text-lg);
+  line-height: 1.6;
+  color: var(--ink-secondary);
+  max-width: 40rem;
+  margin-bottom: var(--space-xl);
+}
+
+.hero-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 0.75rem 1.75rem;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.15s ease;
+}
+.btn-primary:hover {
+  background: var(--ink-secondary);
+  color: var(--paper);
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 0.75rem 1.75rem;
+  background: transparent;
+  color: var(--ink);
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.btn-secondary:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
+.install-snippet {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: 0.625rem 1rem;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-sm);
+  margin-top: var(--space-lg);
+  user-select: all;
+}
+
+.install-snippet .prompt {
+  color: var(--code-comment);
+  user-select: none;
+}
+
+/* ── Stats ribbon ──────────────────────────────── */
+.stats {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-xl) 0;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-xl);
+}
+
+.stat-item {
+  text-align: left;
+}
+
+.stat-number {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.stat-label {
+  font-size: var(--text-xs);
+  color: var(--ink-tertiary);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: var(--space-xs);
+}
+
+/* ── Packages ──────────────────────────────────── */
+.packages {
+  padding: var(--space-3xl) 0;
+}
+
+.section-header {
+  margin-bottom: var(--space-2xl);
+}
+
+.section-eyebrow {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-tertiary);
+  margin-bottom: var(--space-sm);
+}
+
+.section-title {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: var(--text-2xl);
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.packages-grid {
+  display: grid;
+  gap: 1px;
+  background: var(--border-strong);
+}
+
+.package-row {
+  display: grid;
+  grid-template-columns: 13rem 1fr auto;
+  gap: var(--space-xl);
+  align-items: start;
+  background: var(--paper);
+  padding: var(--space-xl) var(--space-lg);
+  transition: background 0.2s ease;
+}
+.package-row:hover {
+  background: var(--paper-warm);
+}
+
+.package-name-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.package-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-lg);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.package-version {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+}
+
+.package-badge {
+  display: inline-block;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.5rem;
+  margin-top: var(--space-xs);
+  width: fit-content;
+}
+
+.badge-stable {
+  color: #0d9488;
+  background: rgba(13, 148, 136, 0.08);
+}
+
+.badge-beta {
+  color: var(--numpy-blue);
+  background: rgba(66, 99, 235, 0.08);
+}
+
+.badge-alpha {
+  color: var(--sklearn-orange);
+  background: rgba(232, 89, 12, 0.08);
+}
+
+.badge-planned {
+  color: var(--ink-muted);
+  background: rgba(160, 160, 174, 0.1);
+}
+
+.package-desc {
+  color: var(--ink-secondary);
+  line-height: 1.6;
+}
+
+.package-meta {
+  font-size: var(--text-sm);
+  color: var(--ink-tertiary);
+  font-family: 'IBM Plex Mono', monospace;
+  white-space: nowrap;
+}
+
+.package-inspired {
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+  margin-top: var(--space-xs);
+}
+
+/* ── Code comparison ───────────────────────────── */
+.comparison {
+  padding: var(--space-3xl) 0;
+  border-top: 1px solid var(--border);
+}
+
+.comparison-layout {
+  display: grid;
+  grid-template-columns: 1fr 3.5rem 1fr;
+  gap: 0;
+  align-items: start;
+  margin-top: var(--space-2xl);
+}
+
+.comparison-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 3.5rem;
+  color: var(--ink-muted);
+  font-size: 1.25rem;
+}
+
+.code-panel {
+  position: relative;
+}
+
+.code-panel-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-tertiary);
+  margin-bottom: var(--space-sm);
+  padding-left: var(--space-sm);
+}
+
+.code-block {
+  background: var(--code-bg);
+  padding: var(--space-lg);
+  overflow-x: auto;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-sm);
+  line-height: 1.7;
+  tab-size: 2;
+}
+
+.code-block code {
+  font-size: inherit;
+}
+
+/* Syntax tokens */
+.kw { color: var(--code-keyword); }
+.fn { color: var(--code-func); }
+.str { color: var(--code-string); }
+.num { color: var(--code-number); }
+.cm { color: var(--code-comment); }
+.ty { color: var(--code-type); }
+.op { color: var(--code-operator); }
+.p { color: var(--code-punctuation); }
+
+/* ── Backends ──────────────────────────────────── */
+.backends {
+  padding: var(--space-3xl) 0;
+  border-top: 1px solid var(--border);
+}
+
+.backends-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--border-strong);
+  margin-top: var(--space-2xl);
+}
+
+.backend-card {
+  background: var(--paper);
+  padding: var(--space-xl);
+}
+
+.backend-icon {
+  font-size: 1.5rem;
+  margin-bottom: var(--space-md);
+  line-height: 1;
+}
+
+.backend-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-base);
+  font-weight: 500;
+  margin-bottom: var(--space-sm);
+}
+
+.backend-desc {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+  line-height: 1.6;
+}
+
+.backend-env {
+  margin-top: var(--space-md);
+  font-size: var(--text-xs);
+  color: var(--ink-tertiary);
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+/* ── Features ──────────────────────────────────── */
+.features {
+  padding: var(--space-3xl) 0;
+  border-top: 1px solid var(--border);
+}
+
+.features-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-2xl) var(--space-3xl);
+  margin-top: var(--space-2xl);
+}
+
+.feature {
+  max-width: 28rem;
+}
+
+.feature-title {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  margin-bottom: var(--space-sm);
+  letter-spacing: -0.01em;
+}
+
+.feature-text {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+  line-height: 1.7;
+}
+
+/* ── Quickstart ────────────────────────────────── */
+.quickstart {
+  padding: var(--space-3xl) 0;
+  border-top: 1px solid var(--border);
+}
+
+.quickstart-steps {
+  display: grid;
+  gap: var(--space-2xl);
+  margin-top: var(--space-2xl);
+  max-width: var(--content-width);
+}
+
+.step {
+  display: grid;
+  grid-template-columns: 2rem 1fr;
+  gap: var(--space-lg);
+}
+
+.step-number {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--ink-muted);
+  line-height: 1;
+  padding-top: 0.1em;
+}
+
+.step-content {}
+
+.step-title {
+  font-weight: 600;
+  margin-bottom: var(--space-sm);
+}
+
+.step .code-block {
+  margin-top: var(--space-sm);
+}
+
+/* ── Footer ────────────────────────────────────── */
+footer {
+  border-top: 1px solid var(--border);
+  padding: var(--space-2xl) 0;
+  margin-top: var(--space-3xl);
+}
+
+.footer-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.footer-left {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: var(--text-sm);
+  color: var(--ink-tertiary);
+}
+
+.footer-links {
+  display: flex;
+  gap: var(--space-lg);
+  list-style: none;
+}
+
+.footer-links a {
+  font-size: var(--text-sm);
+  color: var(--ink-tertiary);
+  font-weight: 500;
+}
+.footer-links a:hover { color: var(--ink); }
+
+/* ── Responsive ────────────────────────────────── */
+@media (max-width: 768px) {
+  .hero { padding: var(--space-3xl) 0 var(--space-2xl); }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-lg);
+  }
+
+  .package-row {
+    grid-template-columns: 1fr;
+    gap: var(--space-md);
+  }
+
+  .package-meta { display: none; }
+
+  .comparison-layout {
+    grid-template-columns: 1fr;
+    gap: var(--space-lg);
+  }
+
+  .comparison-arrow {
+    transform: rotate(90deg);
+    padding: 0;
+  }
+
+  .backends-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .features-list {
+    grid-template-columns: 1fr;
+    gap: var(--space-xl);
+  }
+
+  .nav-links { display: none; }
+
+  .footer-content {
+    flex-direction: column;
+    gap: var(--space-md);
+    text-align: center;
+  }
+
+  .hero-actions {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+/* ── Animations ────────────────────────────────── */
+@media (prefers-reduced-motion: no-preference) {
+  .hero-content, .section-header, .package-row, .backend-card, .feature, .step {
+    opacity: 0;
+    transform: translateY(12px);
+    animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .hero-content { animation-delay: 0.1s; }
+  .section-header { animation-delay: 0.05s; }
+
+  .package-row:nth-child(1) { animation-delay: 0.1s; }
+  .package-row:nth-child(2) { animation-delay: 0.15s; }
+  .package-row:nth-child(3) { animation-delay: 0.2s; }
+  .package-row:nth-child(4) { animation-delay: 0.25s; }
+  .package-row:nth-child(5) { animation-delay: 0.3s; }
+  .package-row:nth-child(6) { animation-delay: 0.35s; }
+
+  .backend-card:nth-child(1) { animation-delay: 0.1s; }
+  .backend-card:nth-child(2) { animation-delay: 0.15s; }
+  .backend-card:nth-child(3) { animation-delay: 0.2s; }
+
+  .feature:nth-child(1) { animation-delay: 0.1s; }
+  .feature:nth-child(2) { animation-delay: 0.15s; }
+  .feature:nth-child(3) { animation-delay: 0.2s; }
+  .feature:nth-child(4) { animation-delay: 0.25s; }
+
+  .step:nth-child(1) { animation-delay: 0.1s; }
+  .step:nth-child(2) { animation-delay: 0.15s; }
+  .step:nth-child(3) { animation-delay: 0.2s; }
+
+  @keyframes fadeUp {
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+</style>
+</head>
+<body>
+
+<!-- Navigation -->
+<nav>
+  <div class="container">
+    <a href="/" class="nav-logo">pydatajs</a>
+    <ul class="nav-links">
+      <li><a href="#packages">Packages</a></li>
+      <li><a href="#backends">Backends</a></li>
+      <li><a href="#features">Features</a></li>
+      <li><a href="#quickstart">Get Started</a></li>
+      <li>
+        <a href="https://github.com/svenflow/pydatajs" class="nav-github" target="_blank" rel="noopener">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+          GitHub
+        </a>
+      </li>
+    </ul>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-content">
+      <div class="hero-eyebrow">Scientific Computing for the Web</div>
+      <h1>The PyData ecosystem,<br>rewritten <em>in JavaScript</em></h1>
+      <p class="hero-description">
+        NumPy, scikit-learn, PyTorch — the libraries that power Python's data science stack, now running natively in browsers and Node.js. Same APIs. Full TypeScript support. GPU-accelerated.
+      </p>
+      <div class="hero-actions">
+        <a href="#quickstart" class="btn-primary">Get Started</a>
+        <a href="https://github.com/svenflow/pydatajs" class="btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
+      </div>
+      <div class="install-snippet">
+        <span class="prompt">$</span>
+        <span>npm install numpyjs</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Stats -->
+<section class="stats">
+  <div class="container">
+    <div class="stats-grid">
+      <div class="stat-item">
+        <div class="stat-number">1,498</div>
+        <div class="stat-label">Tests Passing</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-number">30k+</div>
+        <div class="stat-label">Lines of Code</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-number">3</div>
+        <div class="stat-label">Compute Backends</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-number">100%</div>
+        <div class="stat-label">TypeScript</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Packages -->
+<section class="packages" id="packages">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">Packages</div>
+      <h2 class="section-title">One ecosystem, familiar APIs</h2>
+    </div>
+
+    <div class="packages-grid">
+      <div class="package-row">
+        <div class="package-name-col">
+          <div class="package-name" style="color: var(--numpy-blue)">numpyjs</div>
+          <div class="package-version">v1.0.0</div>
+          <div class="package-badge badge-stable">Stable</div>
+        </div>
+        <div>
+          <div class="package-desc">N-dimensional arrays, linear algebra, FFT, random number generation, statistics. Three backends: pure JS, WebGPU (GPU-accelerated), and WASM (Rust-compiled).</div>
+          <div class="package-inspired">Implements the NumPy API</div>
+        </div>
+        <div class="package-meta">977 + 474 tests</div>
+      </div>
+
+      <div class="package-row">
+        <div class="package-name-col">
+          <div class="package-name" style="color: var(--torch-red)">torchjs</div>
+          <div class="package-version">v0.1.0</div>
+          <div class="package-badge badge-beta">Beta</div>
+        </div>
+        <div>
+          <div class="package-desc">Neural network operations — convolution, pooling, activation functions, loss functions. Implements <code>torch.nn.functional</code> on top of numpyjs.</div>
+          <div class="package-inspired">Implements the PyTorch API</div>
+        </div>
+        <div class="package-meta">29 tests</div>
+      </div>
+
+      <div class="package-row">
+        <div class="package-name-col">
+          <div class="package-name" style="color: var(--sklearn-orange)">scikitlearnjs</div>
+          <div class="package-version">v0.1.0</div>
+          <div class="package-badge badge-alpha">Alpha</div>
+        </div>
+        <div>
+          <div class="package-desc">Classical machine learning — preprocessing, classification, regression, clustering. Built on numpyjs for computation.</div>
+          <div class="package-inspired">Implements the scikit-learn API</div>
+        </div>
+        <div class="package-meta">18 tests</div>
+      </div>
+
+      <div class="package-row">
+        <div class="package-name-col">
+          <div class="package-name" style="color: var(--scipy-teal)">scipyjs</div>
+          <div class="package-badge badge-planned">Planned</div>
+        </div>
+        <div>
+          <div class="package-desc">Scientific computing — optimization, interpolation, signal processing, sparse matrices.</div>
+          <div class="package-inspired">Will implement the SciPy API</div>
+        </div>
+        <div class="package-meta">—</div>
+      </div>
+
+      <div class="package-row">
+        <div class="package-name-col">
+          <div class="package-name" style="color: var(--pandas-navy)">pandasjs</div>
+          <div class="package-badge badge-planned">Planned</div>
+        </div>
+        <div>
+          <div class="package-desc">DataFrames and Series — tabular data manipulation, groupby, merge, pivot, IO.</div>
+          <div class="package-inspired">Will implement the pandas API</div>
+        </div>
+        <div class="package-meta">—</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Code Comparison -->
+<section class="comparison" id="comparison">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">Familiar Syntax</div>
+      <h2 class="section-title">Write what you already know</h2>
+    </div>
+
+    <div class="comparison-layout">
+      <div class="code-panel">
+        <div class="code-panel-label">Python · NumPy</div>
+        <div class="code-block"><code><span class="kw">import</span> numpy <span class="kw">as</span> np
+
+<span class="cm"># Create arrays</span>
+a <span class="op">=</span> np<span class="p">.</span><span class="fn">array</span><span class="p">([[</span><span class="num">1</span><span class="p">,</span> <span class="num">2</span><span class="p">],</span> <span class="p">[</span><span class="num">3</span><span class="p">,</span> <span class="num">4</span><span class="p">]])</span>
+b <span class="op">=</span> np<span class="p">.</span><span class="fn">eye</span><span class="p">(</span><span class="num">2</span><span class="p">)</span>
+
+<span class="cm"># Linear algebra</span>
+c <span class="op">=</span> np<span class="p">.</span><span class="fn">matmul</span><span class="p">(</span>a<span class="p">,</span> b<span class="p">)</span>
+vals<span class="p">,</span> vecs <span class="op">=</span> np<span class="p">.</span>linalg<span class="p">.</span><span class="fn">eig</span><span class="p">(</span>a<span class="p">)</span>
+
+<span class="cm"># Statistics</span>
+<span class="fn">print</span><span class="p">(</span>np<span class="p">.</span><span class="fn">mean</span><span class="p">(</span>a<span class="p">,</span> <span class="ty">axis</span><span class="op">=</span><span class="num">0</span><span class="p">))</span>
+<span class="fn">print</span><span class="p">(</span>np<span class="p">.</span><span class="fn">std</span><span class="p">(</span>a<span class="p">))</span></code></div>
+      </div>
+
+      <div class="comparison-arrow">→</div>
+
+      <div class="code-panel">
+        <div class="code-panel-label">JavaScript · numpyjs</div>
+        <div class="code-block"><code><span class="kw">import</span> <span class="p">{</span> createBackend <span class="p">}</span> <span class="kw">from</span> <span class="str">'numpyjs'</span><span class="p">;</span>
+<span class="kw">const</span> np <span class="op">=</span> <span class="kw">await</span> <span class="fn">createBackend</span><span class="p">(</span><span class="str">'js'</span><span class="p">);</span>
+
+<span class="cm">// Create arrays</span>
+<span class="kw">const</span> a <span class="op">=</span> np<span class="p">.</span><span class="fn">array</span><span class="p">([</span><span class="num">1</span><span class="p">,</span> <span class="num">2</span><span class="p">,</span> <span class="num">3</span><span class="p">,</span> <span class="num">4</span><span class="p">],</span> <span class="p">[</span><span class="num">2</span><span class="p">,</span> <span class="num">2</span><span class="p">]);</span>
+<span class="kw">const</span> b <span class="op">=</span> np<span class="p">.</span><span class="fn">eye</span><span class="p">(</span><span class="num">2</span><span class="p">);</span>
+
+<span class="cm">// Linear algebra</span>
+<span class="kw">const</span> c <span class="op">=</span> np<span class="p">.</span><span class="fn">matmul</span><span class="p">(</span>a<span class="p">,</span> b<span class="p">);</span>
+<span class="kw">const</span> <span class="p">[</span>vals<span class="p">,</span> vecs<span class="p">]</span> <span class="op">=</span> np<span class="p">.</span><span class="fn">eig</span><span class="p">(</span>a<span class="p">);</span>
+
+<span class="cm">// Statistics</span>
+console<span class="p">.</span><span class="fn">log</span><span class="p">(</span>np<span class="p">.</span><span class="fn">mean</span><span class="p">(</span>a<span class="p">,</span> <span class="num">0</span><span class="p">));</span>
+console<span class="p">.</span><span class="fn">log</span><span class="p">(</span>np<span class="p">.</span><span class="fn">std</span><span class="p">(</span>a<span class="p">));</span></code></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Backends -->
+<section class="backends" id="backends">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">Performance</div>
+      <h2 class="section-title">Three backends, one API</h2>
+    </div>
+
+    <div class="backends-grid">
+      <div class="backend-card">
+        <div class="backend-icon">⚡</div>
+        <div class="backend-name">Pure JS</div>
+        <div class="backend-desc">
+          Zero dependencies, zero compilation. Works everywhere JavaScript runs — browsers, Node.js, Bun, Deno, edge functions. The universal default.
+        </div>
+        <div class="backend-env">Node.js · Bun · All browsers</div>
+      </div>
+
+      <div class="backend-card">
+        <div class="backend-icon">◆</div>
+        <div class="backend-name">WebGPU</div>
+        <div class="backend-desc">
+          GPU-accelerated computation via WebGPU shaders. Massive speedups for large matrix operations, convolutions, and batch processing. Runs on the GPU.
+        </div>
+        <div class="backend-env">Chrome 113+ · Edge 113+ · Firefox Nightly</div>
+      </div>
+
+      <div class="backend-card">
+        <div class="backend-icon">⬡</div>
+        <div class="backend-name">WASM</div>
+        <div class="backend-desc">
+          Rust compiled to WebAssembly. Near-native performance for CPU-bound work. SIMD-optimized linear algebra, random number generation, and reduction operations.
+        </div>
+        <div class="backend-env">All modern browsers · Node.js · Bun</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Features -->
+<section class="features" id="features">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">Why pydatajs</div>
+      <h2 class="section-title">Built for real work</h2>
+    </div>
+
+    <div class="features-list">
+      <div class="feature">
+        <div class="feature-title">NumPy-compatible API</div>
+        <div class="feature-text">
+          If you know NumPy, you know numpyjs. Same function names, same parameter signatures, same broadcasting rules. Your Python intuition transfers directly.
+        </div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title">TypeScript-first</div>
+        <div class="feature-text">
+          Every function is fully typed. Your IDE knows the shape of your arrays, the return types of operations, and catches errors before runtime. No <code>any</code> types.
+        </div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title">Swap backends, keep code</div>
+        <div class="feature-text">
+          Switch from JS to WebGPU to WASM by changing a single string. Your application code stays identical. Profile and pick the fastest backend for your workload.
+        </div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-title">Extensively tested</div>
+        <div class="feature-text">
+          1,498 tests across all packages. 100% line coverage on the WASM backend. Output verified against real NumPy, scikit-learn, and PyTorch to ensure correctness.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Quickstart -->
+<section class="quickstart" id="quickstart">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">Get Started</div>
+      <h2 class="section-title">Up and running in 30 seconds</h2>
+    </div>
+
+    <div class="quickstart-steps">
+      <div class="step">
+        <div class="step-number">1</div>
+        <div class="step-content">
+          <div class="step-title">Install</div>
+          <div class="code-block"><code><span class="fn">npm</span> install numpyjs</code></div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-number">2</div>
+        <div class="step-content">
+          <div class="step-title">Import and create a backend</div>
+          <div class="code-block"><code><span class="kw">import</span> <span class="p">{</span> createBackend <span class="p">}</span> <span class="kw">from</span> <span class="str">'numpyjs'</span><span class="p">;</span>
+
+<span class="cm">// Pick your backend</span>
+<span class="kw">const</span> np <span class="op">=</span> <span class="kw">await</span> <span class="fn">createBackend</span><span class="p">(</span><span class="str">'js'</span><span class="p">);</span>      <span class="cm">// CPU — works everywhere</span>
+<span class="cm">// const np = await createBackend('webgpu'); // GPU — Chrome, Edge</span>
+<span class="cm">// const np = await createBackend('wasm');   // Rust WASM — near-native</span></code></div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-number">3</div>
+        <div class="step-content">
+          <div class="step-title">Compute</div>
+          <div class="code-block"><code><span class="cm">// Array creation</span>
+<span class="kw">const</span> x <span class="op">=</span> np<span class="p">.</span><span class="fn">linspace</span><span class="p">(</span><span class="num">0</span><span class="p">,</span> <span class="num">2</span> <span class="op">*</span> Math<span class="p">.</span>PI<span class="p">,</span> <span class="num">1000</span><span class="p">);</span>
+<span class="kw">const</span> y <span class="op">=</span> np<span class="p">.</span><span class="fn">sin</span><span class="p">(</span>x<span class="p">);</span>
+
+<span class="cm">// Linear algebra</span>
+<span class="kw">const</span> A <span class="op">=</span> np<span class="p">.</span><span class="fn">array</span><span class="p">([</span><span class="num">1</span><span class="p">,</span> <span class="num">2</span><span class="p">,</span> <span class="num">3</span><span class="p">,</span> <span class="num">4</span><span class="p">,</span> <span class="num">5</span><span class="p">,</span> <span class="num">6</span><span class="p">,</span> <span class="num">7</span><span class="p">,</span> <span class="num">8</span><span class="p">,</span> <span class="num">9</span><span class="p">],</span> <span class="p">[</span><span class="num">3</span><span class="p">,</span> <span class="num">3</span><span class="p">]);</span>
+<span class="kw">const</span> <span class="p">[</span>U<span class="p">,</span> S<span class="p">,</span> Vt<span class="p">]</span> <span class="op">=</span> np<span class="p">.</span><span class="fn">svd</span><span class="p">(</span>A<span class="p">);</span>
+
+<span class="cm">// Statistics</span>
+<span class="kw">const</span> data <span class="op">=</span> np<span class="p">.</span><span class="fn">random</span><span class="p">.</span><span class="fn">randn</span><span class="p">(</span><span class="num">1000</span><span class="p">);</span>
+console<span class="p">.</span><span class="fn">log</span><span class="p">(</span><span class="str">'mean:'</span><span class="p">,</span> np<span class="p">.</span><span class="fn">mean</span><span class="p">(</span>data<span class="p">));</span>
+console<span class="p">.</span><span class="fn">log</span><span class="p">(</span><span class="str">'std:'</span><span class="p">,</span>  np<span class="p">.</span><span class="fn">std</span><span class="p">(</span>data<span class="p">));</span></code></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <div class="footer-content">
+      <div class="footer-left">pydatajs — MIT License</div>
+      <ul class="footer-links">
+        <li><a href="https://github.com/svenflow/pydatajs" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://www.npmjs.com/package/numpyjs" target="_blank" rel="noopener">npm</a></li>
+        <li><a href="https://github.com/svenflow/pydatajs/issues" target="_blank" rel="noopener">Issues</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
