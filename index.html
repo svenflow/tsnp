@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>pydatajs — PyData for JavaScript</title>
-<meta name="description" content="High-performance scientific computing and machine learning in JavaScript. NumPy, scikit-learn, PyTorch — running natively in the browser and Node.js.">
+<title>numpyjs — NumPy for JavaScript with WebGPU &amp; WASM</title>
+<meta name="description" content="NumPy for JavaScript. Full NumPy API with optimized GEMM via WebGPU and WASM SIMD. 3,272 GFLOPS on M4, faster than tfjs.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,600;0,9..144,700;0,9..144,800;1,9..144,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -902,9 +902,8 @@ footer {
 <!-- Navigation -->
 <nav>
   <div class="container">
-    <a href="/" class="nav-logo">pydatajs</a>
+    <a href="/" class="nav-logo">numpyjs</a>
     <ul class="nav-links">
-      <li><a href="#packages">Packages</a></li>
       <li><a href="#backends">Backends</a></li>
       <li><a href="#benchmarks">Benchmarks</a></li>
       <li><a href="#features">Features</a></li>
@@ -923,10 +922,10 @@ footer {
 <section class="hero">
   <div class="container">
     <div class="hero-content">
-      <div class="hero-eyebrow">Scientific Computing for the Web</div>
-      <h1>The PyData ecosystem,<br>rewritten <em>in JavaScript</em></h1>
+      <div class="hero-eyebrow">WebGPU &middot; WASM SIMD &middot; Pure JS</div>
+      <h1>NumPy for JavaScript,<br><em>with optimized GEMM</em></h1>
       <p class="hero-description">
-        NumPy, scikit-learn, PyTorch — the libraries that power Python's data science stack, now running natively in browsers and Node.js. Same APIs. Full TypeScript support. GPU-accelerated.
+        Full NumPy API in TypeScript. GPU-accelerated matmul via WebGPU (3,272 GFLOPS on M4). WASM SIMD backend with futex thread pool. Runs in browsers and Node.js.
       </p>
       <div class="hero-actions">
         <a href="#quickstart" class="btn-primary">Get Started</a>
@@ -935,105 +934,6 @@ footer {
       <div class="install-snippet">
         <span class="prompt">$</span>
         <span>npm install numpyjs</span>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- Stats -->
-<section class="stats">
-  <div class="container">
-    <div class="stats-grid">
-      <div class="stat-item">
-        <div class="stat-number">1,498</div>
-        <div class="stat-label">Tests Passing</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-number">30k+</div>
-        <div class="stat-label">Lines of Code</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-number">3</div>
-        <div class="stat-label">Compute Backends</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-number">100%</div>
-        <div class="stat-label">TypeScript</div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- Packages -->
-<section class="packages" id="packages">
-  <div class="container">
-    <div class="section-header">
-      <div class="section-eyebrow">Packages</div>
-      <h2 class="section-title">One ecosystem, familiar APIs</h2>
-    </div>
-
-    <div class="packages-grid">
-      <div class="package-row">
-        <div class="package-name-col">
-          <div class="package-name" style="color: var(--numpy-blue)">numpyjs</div>
-          <div class="package-version">v1.0.0</div>
-          <div class="package-badge badge-stable">Stable</div>
-        </div>
-        <div>
-          <div class="package-desc">N-dimensional arrays, linear algebra, FFT, random number generation, statistics. Three backends: pure JS, WebGPU (GPU-accelerated), and WASM (Rust-compiled).</div>
-          <div class="package-inspired">Implements the NumPy API</div>
-        </div>
-        <div class="package-meta">977 + 474 tests</div>
-      </div>
-
-      <div class="package-row">
-        <div class="package-name-col">
-          <div class="package-name" style="color: var(--torch-red)">torchjs</div>
-          <div class="package-version">v0.1.0</div>
-          <div class="package-badge badge-beta">Beta</div>
-        </div>
-        <div>
-          <div class="package-desc">Neural network operations — convolution, pooling, activation functions, loss functions. Implements <code>torch.nn.functional</code> on top of numpyjs.</div>
-          <div class="package-inspired">Implements the PyTorch API</div>
-        </div>
-        <div class="package-meta">29 tests</div>
-      </div>
-
-      <div class="package-row">
-        <div class="package-name-col">
-          <div class="package-name" style="color: var(--sklearn-orange)">scikitlearnjs</div>
-          <div class="package-version">v0.1.0</div>
-          <div class="package-badge badge-alpha">Alpha</div>
-        </div>
-        <div>
-          <div class="package-desc">Classical machine learning — preprocessing, classification, regression, clustering. Built on numpyjs for computation.</div>
-          <div class="package-inspired">Implements the scikit-learn API</div>
-        </div>
-        <div class="package-meta">18 tests</div>
-      </div>
-
-      <div class="package-row">
-        <div class="package-name-col">
-          <div class="package-name" style="color: var(--scipy-teal)">scipyjs</div>
-          <div class="package-badge badge-planned">Planned</div>
-        </div>
-        <div>
-          <div class="package-desc">Scientific computing — optimization, interpolation, signal processing, sparse matrices.</div>
-          <div class="package-inspired">Will implement the SciPy API</div>
-        </div>
-        <div class="package-meta">—</div>
-      </div>
-
-      <div class="package-row">
-        <div class="package-name-col">
-          <div class="package-name" style="color: var(--pandas-navy)">pandasjs</div>
-          <div class="package-badge badge-planned">Planned</div>
-        </div>
-        <div>
-          <div class="package-desc">DataFrames and Series — tabular data manipulation, groupby, merge, pivot, IO.</div>
-          <div class="package-inspired">Will implement the pandas API</div>
-        </div>
-        <div class="package-meta">—</div>
       </div>
     </div>
   </div>
@@ -1397,9 +1297,9 @@ window.runPageBenchmark = async function() {
       </div>
 
       <div class="feature">
-        <div class="feature-title">Extensively tested</div>
+        <div class="feature-title">Verified against NumPy</div>
         <div class="feature-text">
-          1,498 tests across all packages. 100% line coverage on the WASM backend. Output verified against real NumPy, scikit-learn, and PyTorch to ensure correctness.
+          Output verified against real NumPy to ensure correctness. Broadcasting, axis reductions, linear algebra, FFT — all match NumPy's behavior.
         </div>
       </div>
     </div>
@@ -1462,7 +1362,7 @@ console<span class="p">.</span><span class="fn">log</span><span class="p">(</spa
 <footer>
   <div class="container">
     <div class="footer-content">
-      <div class="footer-left">pydatajs — MIT License</div>
+      <div class="footer-left">numpyjs — MIT License</div>
       <ul class="footer-links">
         <li><a href="https://github.com/svenflow/pydatajs" target="_blank" rel="noopener">GitHub</a></li>
         <li><a href="https://www.npmjs.com/package/numpyjs" target="_blank" rel="noopener">npm</a></li>
