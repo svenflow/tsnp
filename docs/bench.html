@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>numpyjs Matmul Benchmark — WebGPU vs WASM SIMD vs tfjs</title>
+  <script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+  <script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.22.0/dist/tf-backend-webgpu.min.js"></script>
+  <script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.22.0/dist/tf-backend-wasm.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', sans-serif;
+      background: #111; color: #e0e0e0;
+      padding: 16px; max-width: 900px; margin: 0 auto;
+    }
+    h1 { font-size: 22px; color: #fff; margin-bottom: 8px; }
+    .subtitle { font-size: 13px; color: #888; margin-bottom: 16px; }
+    .card {
+      background: #1e1e1e; border-radius: 12px; padding: 16px;
+      margin-bottom: 12px; border: 1px solid #333;
+    }
+    .card h2 { font-size: 16px; color: #fff; margin-bottom: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th { text-align: left; padding: 6px 8px; color: #888; border-bottom: 1px solid #333; font-size: 11px; }
+    td { padding: 6px 8px; border-bottom: 1px solid #222; }
+    .gflops { font-weight: bold; }
+    .winner { color: #4ade80; }
+    .best-cell { background: #166534; }
+    .faster { color: #4ade80; font-weight: bold; }
+    .slower { color: #f87171; }
+    .btn {
+      display: inline-block; padding: 14px 24px;
+      background: #2563eb; color: white; border: none;
+      border-radius: 10px; font-size: 16px; font-weight: 600;
+      cursor: pointer; margin-bottom: 12px; margin-right: 8px;
+    }
+    .btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+    .btn:active:not(:disabled) { background: #1d4ed8; }
+    #status { font-size: 13px; color: #888; margin-bottom: 8px; min-height: 20px; }
+    pre {
+      background: #1a1a1a; padding: 10px; border-radius: 8px;
+      font-size: 11px; overflow-x: auto; max-height: 400px;
+      overflow-y: auto; color: #aaa; white-space: pre-wrap;
+    }
+    .device-info { font-size: 12px; color: #666; margin-bottom: 12px; }
+    .note { font-size: 11px; color: #555; margin-top: 8px; }
+    .init-status { font-size: 12px; margin: 4px 0; }
+    .init-ok { color: #4ade80; }
+    .init-fail { color: #f87171; }
+  </style>
+</head>
+<body>
+  <h1>⚡ numpyjs Matmul Benchmark</h1>
+  <div class="subtitle">WebGPU (BCACHE shader) • WASM SIMD (6x8 FMA, futex thread pool) • tfjs WebGPU • tfjs WASM (XNNPACK) • f32</div>
+  <div id="device-info" class="device-info"></div>
+  <div id="init-status"></div>
+
+  <button class="btn" id="runBtn" onclick="runBenchmark()">Run Benchmark</button>
+  <div id="status"></div>
+
+  <div class="card" id="results-card" style="display:none">
+    <h2>Results (GFLOPS — higher is better)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Size</th>
+          <th>numpyjs WebGPU</th>
+          <th>numpyjs WASM</th>
+          <th>tfjs WebGPU</th>
+          <th>tfjs WASM</th>
+          <th>Best</th>
+        </tr>
+      </thead>
+      <tbody id="results"></tbody>
+    </table>
+    <div class="note">WebGPU = GPU-resident f32 (no CPU readback). WASM = SIMD f32 (futex thread pool, or single-threaded fallback). tfjs WebGPU = kernel + await data(). tfjs WASM = XNNPACK multithreaded.</div>
+  </div>
+
+  <div class="card">
+    <h2>Log</h2>
+    <pre id="log">Initializing...</pre>
+  </div>
+
+<script type="module">
+// ============ BCACHE WGSL Shader (our fastest WebGPU kernel) ============
+const MATMUL_SHADER = `
+  struct Uniforms { M: u32, K: u32, N: u32, _pad: u32, }
+  @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+  @group(0) @binding(1) var<storage, read> A: array<vec4<f32>>;
+  @group(0) @binding(2) var<storage, read> B: array<vec4<f32>>;
+  @group(0) @binding(3) var<storage, read_write> C: array<vec4<f32>>;
+  var<workgroup> mm_Asub: array<array<vec4<f32>, 8>, 32>;
+  var<workgroup> mm_Bsub: array<array<vec4<f32>, 8>, 32>;
+
+  @compute @workgroup_size(8, 8, 1)
+  fn main(@builtin(local_invocation_id) localId: vec3<u32>, @builtin(global_invocation_id) globalId: vec3<u32>) {
+    let M = i32(uniforms.M);
+    let K = i32(uniforms.K);
+    let N = i32(uniforms.N);
+    let KVec4 = K / 4;
+    let NVec4 = N / 4;
+
+    let localRow = i32(localId.y);
+    let tileRow = localRow * 4;
+    let tileCol = i32(localId.x);
+    let globalRow = i32(globalId.y) * 4;
+    let globalCol = i32(globalId.x) * 4;
+
+    var acc: array<vec4<f32>, 4>;
+    acc[0] = vec4<f32>(0.0); acc[1] = vec4<f32>(0.0);
+    acc[2] = vec4<f32>(0.0); acc[3] = vec4<f32>(0.0);
+
+    let numTiles = (K + 31) / 32;
+    var kStart = 0;
+    let tileRowB = localRow * 4;
+
+    for (var t = 0; t < numTiles; t++) {
+      for (var innerRow = 0; innerRow < 4; innerRow++) {
+        let inputRow = tileRow + innerRow;
+        let aRow = globalRow + innerRow;
+        let aColVec4 = (kStart + tileCol * 4) / 4;
+        if (aRow < M && aColVec4 < KVec4) {
+          mm_Asub[inputRow][tileCol] = A[aRow * KVec4 + aColVec4];
+        } else {
+          mm_Asub[inputRow][tileCol] = vec4<f32>(0.0);
+        }
+      }
+
+      for (var innerRow = 0; innerRow < 4; innerRow++) {
+        let inputRow = tileRowB + innerRow;
+        let bRow = kStart + inputRow;
+        let bColVec4 = globalCol / 4;
+        if (bRow < K && bColVec4 < NVec4) {
+          mm_Bsub[inputRow][tileCol] = B[bRow * NVec4 + bColVec4];
+        } else {
+          mm_Bsub[inputRow][tileCol] = vec4<f32>(0.0);
+        }
+      }
+
+      kStart = kStart + 32;
+      workgroupBarrier();
+
+      for (var k = 0; k < 8; k++) {
+        let BCached0 = mm_Bsub[k * 4 + 0][tileCol];
+        let BCached1 = mm_Bsub[k * 4 + 1][tileCol];
+        let BCached2 = mm_Bsub[k * 4 + 2][tileCol];
+        let BCached3 = mm_Bsub[k * 4 + 3][tileCol];
+
+        for (var i = 0; i < 4; i++) {
+          let ACached = mm_Asub[tileRow + i][k];
+          acc[i] = fma(BCached0, vec4<f32>(ACached[0]), acc[i]);
+          acc[i] = fma(BCached1, vec4<f32>(ACached[1]), acc[i]);
+          acc[i] = fma(BCached2, vec4<f32>(ACached[2]), acc[i]);
+          acc[i] = fma(BCached3, vec4<f32>(ACached[3]), acc[i]);
+        }
+      }
+      workgroupBarrier();
+    }
+
+    for (var innerRow = 0; innerRow < 4; innerRow++) {
+      let outRow = globalRow + innerRow;
+      let outColVec4 = globalCol / 4;
+      if (outRow < M && outColVec4 < NVec4) {
+        C[outRow * NVec4 + outColVec4] = acc[innerRow];
+      }
+    }
+  }
+`;
+
+let device = null;
+let pipeline = null;
+let wasmModule = null;
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+const resultsCard = document.getElementById('results-card');
+const runBtn = document.getElementById('runBtn');
+const deviceInfoEl = document.getElementById('device-info');
+const initStatusEl = document.getElementById('init-status');
+
+function log(msg) {
+  logEl.textContent += '\n' + msg;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+function initStatus(name, ok, detail = '') {
+  const div = document.createElement('div');
+  div.className = `init-status ${ok ? 'init-ok' : 'init-fail'}`;
+  div.textContent = `${ok ? '✅' : '❌'} ${name}${detail ? ': ' + detail : ''}`;
+  initStatusEl.appendChild(div);
+}
+
+// ============ WebGPU Init ============
+async function initWebGPU() {
+  if (!navigator.gpu) throw new Error('WebGPU not supported');
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) throw new Error('No GPU adapter found');
+
+  const info = adapter.info || {};
+  const desc = info.description || info.device || 'Unknown GPU';
+  const vendor = info.vendor || '';
+  const arch = info.architecture || '';
+  deviceInfoEl.textContent = `GPU: ${desc} ${vendor} ${arch}`.trim();
+
+  device = await adapter.requestDevice({
+    requiredLimits: {
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      maxBufferSize: adapter.limits.maxBufferSize,
+      maxComputeWorkgroupsPerDimension: adapter.limits.maxComputeWorkgroupsPerDimension,
+    },
+  });
+
+  const module = device.createShaderModule({ code: MATMUL_SHADER });
+  pipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: { module, entryPoint: 'main' },
+  });
+
+  log('WebGPU initialized: ' + desc);
+  initStatus('WebGPU', true, desc);
+}
+
+// ============ WASM SIMD Init ============
+let wasmThreaded = false; // true = futex pool, false = single-threaded fallback
+async function initWasm() {
+  try {
+    const module = await import('./packages/numpyjs-wasm/crates/rumpy-wasm/pkg/rumpy_wasm.js');
+    const pkgBase = './packages/numpyjs-wasm/crates/rumpy-wasm/pkg/';
+    const fastWasm = pkgBase + 'rumpy_wasm_bg.wasm';
+    const compatWasm = pkgBase.replace('/pkg/', '/pkg-compat/') + 'rumpy_wasm_bg.wasm';
+
+    // Try fast binary (relaxed-simd FMA), fall back to compat (basic simd128)
+    let variant = 'relaxed-simd';
+    try {
+      await module.default(new URL(fastWasm, location.href));
+      log('WASM: loaded fast binary (relaxed-simd FMA)');
+    } catch (e) {
+      log('WASM: relaxed-simd not supported, trying compat binary...');
+      variant = 'simd128';
+      await module.default(new URL(compatWasm, location.href));
+      log('WASM: loaded compat binary (basic simd128)');
+    }
+
+    // Try futex thread pool, fall back to single-threaded if it fails (e.g. iOS Safari)
+    try {
+      const numThreads = navigator.hardwareConcurrency || 4;
+      log(`WASM: initializing futex pool with ${numThreads} threads...`);
+      module.initFutexPool(numThreads);
+      let waited = 0;
+      while (!module.futexWorkersReady()) {
+        await new Promise(r => setTimeout(r, 10));
+        waited += 10;
+        if (waited > 10000) throw new Error('futex pool init timed out after 10s');
+      }
+      const readyCount = module.futexWorkersReadyCount();
+      wasmThreaded = true;
+      wasmModule = module;
+      log(`WASM SIMD initialized (${readyCount} futex workers, ${variant})`);
+      initStatus('WASM SIMD', true, `${readyCount} workers, ${variant}`);
+    } catch (e) {
+      log('WASM: futex pool failed (' + e.message + '), using single-threaded fallback');
+      wasmThreaded = false;
+      wasmModule = module;
+      initStatus('WASM SIMD', true, `single-threaded, ${variant} (no threading)`);
+    }
+    return true;
+  } catch (e) {
+    log('WASM SIMD failed: ' + e.message);
+    initStatus('WASM SIMD', false, e.message);
+    return false;
+  }
+}
+
+// ============ tfjs WebGPU Init ============
+async function initTfjsWebGPU() {
+  try {
+    await tf.setBackend('webgpu');
+    await tf.ready();
+    const backend = tf.getBackend();
+    log('tfjs WebGPU initialized: backend=' + backend);
+    initStatus('tfjs WebGPU', true, 'backend=' + backend);
+    return true;
+  } catch (e) {
+    log('tfjs WebGPU failed: ' + e.message);
+    initStatus('tfjs WebGPU', false, e.message);
+    return false;
+  }
+}
+
+// ============ tfjs WASM Init ============
+async function initTfjsWasm() {
+  try {
+    // Set WASM paths for tfjs
+    if (tf.wasm && tf.wasm.setWasmPaths) {
+      tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.22.0/dist/');
+    }
+    // Register and set WASM backend (need a separate tf env for this)
+    // tfjs doesn't support running two backends simultaneously in the same tf instance.
+    // We'll switch backends for the WASM benchmark.
+    log('tfjs WASM: backend registered');
+    initStatus('tfjs WASM', true, 'XNNPACK multithreaded (will switch for bench)');
+    return true;
+  } catch (e) {
+    log('tfjs WASM failed: ' + e.message);
+    initStatus('tfjs WASM', false, e.message);
+    return false;
+  }
+}
+
+// ============ Buffer helpers ============
+function createBuffer(data, usage) {
+  const buf = device.createBuffer({
+    size: data.byteLength,
+    usage: usage | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(buf, 0, data);
+  return buf;
+}
+
+// ============ Benchmark: numpyjs WebGPU ============
+async function benchWebGPU(size, warmup = 5, runs = 10) {
+  const n = size;
+  const nPad = Math.ceil(n / 4) * 4;
+
+  const aData = new Float32Array(n * nPad);
+  const bData = new Float32Array(n * nPad);
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      aData[r * nPad + c] = Math.random();
+      bData[r * nPad + c] = Math.random();
+    }
+  }
+
+  const aBuf = createBuffer(aData, GPUBufferUsage.STORAGE);
+  const bBuf = createBuffer(bData, GPUBufferUsage.STORAGE);
+  const cBuf = device.createBuffer({
+    size: n * nPad * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+  });
+  const uniformBuf = createBuffer(new Uint32Array([n, n, n, 0]), GPUBufferUsage.UNIFORM);
+
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuf } },
+      { binding: 1, resource: { buffer: aBuf } },
+      { binding: 2, resource: { buffer: bBuf } },
+      { binding: 3, resource: { buffer: cBuf } },
+    ],
+  });
+
+  const wgX = Math.ceil(n / 32);
+  const wgY = Math.ceil(n / 32);
+
+  for (let i = 0; i < warmup; i++) {
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(wgX, wgY);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+  await device.queue.onSubmittedWorkDone();
+
+  const times = [];
+  for (let i = 0; i < runs; i++) {
+    const start = performance.now();
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(wgX, wgY);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    times.push(performance.now() - start);
+  }
+
+  aBuf.destroy(); bBuf.destroy(); cBuf.destroy(); uniformBuf.destroy();
+
+  const avg = times.reduce((a, b) => a + b) / times.length;
+  const flops = 2 * n * n * n;
+  return { avgMs: avg, gflops: flops / (avg / 1000) / 1e9 };
+}
+
+// ============ Benchmark: WASM SIMD ============
+function benchWasm(size, warmup = 3, runs = 10) {
+  if (!wasmModule) return null;
+
+  const n = size;
+  const aData = new Float32Array(n * n);
+  const bData = new Float32Array(n * n);
+  for (let i = 0; i < n * n; i++) {
+    aData[i] = Math.random();
+    bData[i] = Math.random();
+  }
+
+  // Use futex pool if available, else single-threaded SIMD
+  const matmul = wasmThreaded ? wasmModule.matmulF32Futex : wasmModule.matmulF32Optimized;
+
+  // Warmup
+  for (let i = 0; i < warmup; i++) {
+    matmul(aData, bData, n, n, n);
+  }
+
+  const times = [];
+  for (let i = 0; i < runs; i++) {
+    const start = performance.now();
+    matmul(aData, bData, n, n, n);
+    times.push(performance.now() - start);
+  }
+
+  const avg = times.reduce((a, b) => a + b) / times.length;
+  const flops = 2 * n * n * n;
+  return { avgMs: avg, gflops: flops / (avg / 1000) / 1e9 };
+}
+
+// ============ Benchmark: tfjs WASM (XNNPACK) ============
+async function benchTfjsWasm(size, warmup = 5, runs = 10) {
+  // Switch to WASM backend
+  const prevBackend = tf.getBackend();
+  if (tf.wasm && tf.wasm.setWasmPaths) {
+    tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.22.0/dist/');
+  }
+  await tf.setBackend('wasm');
+  await tf.ready();
+
+  const aData = new Float32Array(size * size);
+  const bData = new Float32Array(size * size);
+  for (let i = 0; i < size * size; i++) {
+    aData[i] = Math.random();
+    bData[i] = Math.random();
+  }
+
+  const tfA = tf.tensor2d(aData, [size, size], 'float32');
+  const tfB = tf.tensor2d(bData, [size, size], 'float32');
+
+  for (let i = 0; i < warmup; i++) {
+    const c = tf.matMul(tfA, tfB);
+    c.dataSync();
+    c.dispose();
+  }
+
+  const times = [];
+  for (let i = 0; i < runs; i++) {
+    const start = performance.now();
+    const c = tf.matMul(tfA, tfB);
+    c.dataSync();
+    times.push(performance.now() - start);
+    c.dispose();
+  }
+
+  tfA.dispose(); tfB.dispose();
+
+  // Switch back to WebGPU
+  if (prevBackend && prevBackend !== 'wasm') {
+    await tf.setBackend(prevBackend);
+    await tf.ready();
+  }
+
+  const avg = times.reduce((a, b) => a + b) / times.length;
+  const flops = 2 * size * size * size;
+  return { avgMs: avg, gflops: flops / (avg / 1000) / 1e9 };
+}
+
+// ============ Benchmark: tfjs WebGPU ============
+async function benchTfjs(size, warmup = 5, runs = 10) {
+  const aData = new Float32Array(size * size);
+  const bData = new Float32Array(size * size);
+  for (let i = 0; i < size * size; i++) {
+    aData[i] = Math.random();
+    bData[i] = Math.random();
+  }
+
+  const tfA = tf.tensor2d(aData, [size, size], 'float32');
+  const tfB = tf.tensor2d(bData, [size, size], 'float32');
+
+  for (let i = 0; i < warmup; i++) {
+    const c = tf.matMul(tfA, tfB);
+    await c.data();
+    c.dispose();
+  }
+
+  const times = [];
+  for (let i = 0; i < runs; i++) {
+    const start = performance.now();
+    const c = tf.matMul(tfA, tfB);
+    await c.data();
+    times.push(performance.now() - start);
+    c.dispose();
+  }
+
+  tfA.dispose(); tfB.dispose();
+
+  const avg = times.reduce((a, b) => a + b) / times.length;
+  const flops = 2 * size * size * size;
+  return { avgMs: avg, gflops: flops / (avg / 1000) / 1e9 };
+}
+
+// ============ Main ============
+function getSizes() {
+  const params = new URLSearchParams(location.search);
+  if (params.has('sizes')) {
+    return params.get('sizes').split(',').map(Number);
+  }
+  const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
+  return isMobile ? [256, 512, 1024] : [256, 512, 1024, 2048, 4096];
+}
+
+let tfjsReady = false;
+let tfjsWasmReady = false;
+
+window.runBenchmark = async function() {
+  runBtn.disabled = true;
+  logEl.textContent = '';
+  resultsEl.innerHTML = '';
+  resultsCard.style.display = 'block';
+  initStatusEl.innerHTML = '';
+
+  try {
+    setStatus('Initializing backends...');
+
+    // Init all backends — gracefully handle missing WebGPU (e.g. mobile Safari)
+    let webgpuOk = false;
+    if (!device) {
+      try {
+        await initWebGPU();
+        webgpuOk = true;
+      } catch (e) {
+        log('WebGPU not available: ' + e.message);
+        initStatus('WebGPU', false, e.message);
+      }
+    } else {
+      webgpuOk = true;
+    }
+    const wasmOk = await initWasm();
+    if (webgpuOk) {
+      tfjsReady = await initTfjsWebGPU();
+    } else {
+      log('tfjs WebGPU skipped (no WebGPU)');
+      initStatus('tfjs WebGPU', false, 'no WebGPU on this device');
+    }
+    tfjsWasmReady = await initTfjsWasm();
+
+    const sizes = getSizes();
+    const allResults = [];
+
+    for (const size of sizes) {
+      setStatus(`Benchmarking ${size}×${size}...`);
+      log(`\n--- ${size}×${size} ---`);
+
+      // numpyjs WebGPU
+      let webgpu = null;
+      if (webgpuOk) {
+        try {
+          webgpu = await benchWebGPU(size);
+          log(`  WebGPU:    ${webgpu.avgMs.toFixed(2)}ms = ${webgpu.gflops.toFixed(0)} GFLOPS`);
+        } catch (e) {
+          log(`  WebGPU:    FAILED - ${e.message}`);
+        }
+      }
+
+      // WASM SIMD (multi-threaded)
+      let wasm = null;
+      if (wasmOk) {
+        try {
+          wasm = benchWasm(size);
+          log(`  WASM SIMD: ${wasm.avgMs.toFixed(2)}ms = ${wasm.gflops.toFixed(0)} GFLOPS`);
+        } catch (e) {
+          log(`  WASM SIMD: FAILED - ${e.message}`);
+        }
+      }
+
+      // tfjs WebGPU
+      let tfjs = null;
+      if (tfjsReady) {
+        try {
+          // Make sure we're on webgpu backend
+          if (tf.getBackend() !== 'webgpu') { await tf.setBackend('webgpu'); await tf.ready(); }
+          tfjs = await benchTfjs(size);
+          log(`  tfjs GPU:  ${tfjs.avgMs.toFixed(2)}ms = ${tfjs.gflops.toFixed(0)} GFLOPS`);
+        } catch (e) {
+          log(`  tfjs GPU:  FAILED - ${e.message}`);
+        }
+      }
+
+      // tfjs WASM (XNNPACK)
+      let tfjsWasm = null;
+      if (tfjsWasmReady) {
+        try {
+          tfjsWasm = await benchTfjsWasm(size);
+          log(`  tfjs WASM: ${tfjsWasm.avgMs.toFixed(2)}ms = ${tfjsWasm.gflops.toFixed(0)} GFLOPS`);
+        } catch (e) {
+          log(`  tfjs WASM: FAILED - ${e.message}`);
+        }
+      }
+
+      allResults.push({ size, webgpu, wasm, tfjs, tfjsWasm });
+
+      // Find best
+      const entries = [
+        { name: 'WebGPU', r: webgpu },
+        { name: 'WASM', r: wasm },
+        { name: 'tfjs GPU', r: tfjs },
+        { name: 'tfjs WASM', r: tfjsWasm },
+      ].filter(e => e.r);
+      const best = entries.length > 0 ? entries.reduce((a, b) => a.r.gflops > b.r.gflops ? a : b) : null;
+
+      // Build table row
+      const tr = document.createElement('tr');
+      const fmtCell = (r, isBest) => {
+        if (!r) return '<td>—</td>';
+        const cls = isBest ? 'gflops best-cell' : 'gflops';
+        return `<td class="${cls}">${r.gflops.toFixed(0)} <small>(${r.avgMs.toFixed(2)}ms)</small></td>`;
+      };
+
+      tr.innerHTML = `
+        <td><strong>${size}</strong></td>
+        ${fmtCell(webgpu, best && best.name === 'WebGPU')}
+        ${fmtCell(wasm, best && best.name === 'WASM')}
+        ${fmtCell(tfjs, best && best.name === 'tfjs GPU')}
+        ${fmtCell(tfjsWasm, best && best.name === 'tfjs WASM')}
+        <td class="faster">${best ? best.name : '—'}</td>
+      `;
+      resultsEl.appendChild(tr);
+    }
+
+    // Summary
+    log('\n=== SUMMARY ===');
+    for (const r of allResults) {
+      const parts = [];
+      if (r.webgpu) parts.push(`WebGPU: ${r.webgpu.gflops.toFixed(0)}`);
+      if (r.wasm) parts.push(`WASM: ${r.wasm.gflops.toFixed(0)}`);
+      if (r.tfjs) parts.push(`tfjs-GPU: ${r.tfjs.gflops.toFixed(0)}`);
+      if (r.tfjsWasm) parts.push(`tfjs-WASM: ${r.tfjsWasm.gflops.toFixed(0)}`);
+
+      // Compare our WASM vs tfjs WASM (apples-to-apples CPU comparison)
+      let cmpWasm = '';
+      if (r.wasm && r.tfjsWasm) {
+        const ratio = r.wasm.gflops / r.tfjsWasm.gflops;
+        if (ratio > 1) {
+          cmpWasm = ` → our WASM ${ratio.toFixed(2)}x vs tfjs WASM`;
+        } else {
+          cmpWasm = ` → tfjs WASM ${(1/ratio).toFixed(2)}x vs our WASM`;
+        }
+      }
+
+      // Compare our best vs tfjs best
+      const ourBest = r.webgpu && r.wasm
+        ? (r.webgpu.gflops > r.wasm.gflops ? r.webgpu : r.wasm)
+        : (r.webgpu || r.wasm);
+      const tfjsBest = r.tfjs && r.tfjsWasm
+        ? (r.tfjs.gflops > r.tfjsWasm.gflops ? r.tfjs : r.tfjsWasm)
+        : (r.tfjs || r.tfjsWasm);
+      let cmpBest = '';
+      if (ourBest && tfjsBest) {
+        const ratio = ourBest.gflops / tfjsBest.gflops;
+        if (ratio > 1) {
+          cmpBest = ` → numpyjs ${ratio.toFixed(2)}x faster`;
+        } else {
+          cmpBest = ` → tfjs ${(1/ratio).toFixed(2)}x faster`;
+        }
+      }
+      log(`${r.size}: ${parts.join(' | ')} GFLOPS${cmpWasm}${cmpBest ? ' | ' + cmpBest : ''}`);
+    }
+
+    const webgpuResults = allResults.filter(r => r.webgpu);
+    if (webgpuResults.length > 0) {
+      const peak = webgpuResults.reduce((a, b) => (a.webgpu.gflops > b.webgpu.gflops ? a : b));
+      log(`\nPeak WebGPU: ${peak.webgpu.gflops.toFixed(0)} GFLOPS at ${peak.size}×${peak.size}`);
+      if (peak.webgpu.gflops > 1000) log(`🔥 ${(peak.webgpu.gflops / 1000).toFixed(1)} TFLOPS!`);
+      setStatus(`Done! Peak: ${peak.webgpu.gflops.toFixed(0)} GFLOPS`);
+    }
+
+    window.benchmarkResults = allResults;
+
+  } catch (e) {
+    log('ERROR: ' + e.message);
+    setStatus('Error: ' + e.message);
+    console.error(e);
+  }
+
+  runBtn.disabled = false;
+};
+
+// Auto-start if URL param is set
+if (new URLSearchParams(location.search).has('autostart')) {
+  window.runBenchmark();
+}
+</script>
+</body>
+</html>

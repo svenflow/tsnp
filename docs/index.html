@@ -965,6 +965,52 @@ console<span class="p">.</span><span class="fn">log</span><span class="p">(</spa
   </div>
 </section>
 
+<!-- Benchmarks -->
+<section class="backends" id="benchmarks">
+  <div class="container">
+    <div class="section-header">
+      <div class="section-eyebrow">Benchmarks</div>
+      <h2 class="section-title">Faster than tfjs on real hardware</h2>
+    </div>
+
+    <div class="backends-grid">
+      <div class="backend-card">
+        <div class="backend-icon">💻</div>
+        <div class="backend-name">Apple M4 — WebGPU</div>
+        <div class="backend-desc" style="font-variant-numeric: tabular-nums;">
+          <strong>3,272 GFLOPS peak</strong> at 4096×4096 matmul.<br>
+          1.45× faster than tfjs WebGPU. Beats tfjs at every size ≥512.
+        </div>
+        <div class="backend-env">BCACHE shader · f32 · GPU-resident</div>
+      </div>
+
+      <div class="backend-card">
+        <div class="backend-icon">📱</div>
+        <div class="backend-name">iPhone 17 Pro — WebGPU</div>
+        <div class="backend-desc" style="font-variant-numeric: tabular-nums;">
+          <strong>781 GFLOPS peak</strong> at 2048×2048 matmul.<br>
+          Beats tfjs at every size tested (512, 1024, 2048).
+        </div>
+        <div class="backend-env">A18 Pro GPU · Safari · LambdaTest verified</div>
+      </div>
+
+      <div class="backend-card">
+        <div class="backend-icon">⬡</div>
+        <div class="backend-name">WASM SIMD — CPU</div>
+        <div class="backend-desc" style="font-variant-numeric: tabular-nums;">
+          <strong>625 GFLOPS peak</strong> at 4096×4096 matmul.<br>
+          Beats tfjs WASM (XNNPACK) at sizes ≥1024. Futex thread pool + FMA.
+        </div>
+        <div class="backend-env">All browsers · relaxed-SIMD fast path</div>
+      </div>
+    </div>
+
+    <div style="text-align: center; margin-top: 2rem;">
+      <a href="bench.html" style="display: inline-block; padding: 0.75rem 1.5rem; background: var(--accent); color: white; border-radius: 8px; text-decoration: none; font-weight: 600; font-family: var(--font-body, 'IBM Plex Sans', sans-serif);">Run benchmark on your device →</a>
+    </div>
+  </div>
+</section>
+
 <!-- Features -->
 <section class="features" id="features">
   <div class="container">

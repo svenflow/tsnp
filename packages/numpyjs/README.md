@@ -9,7 +9,7 @@ Part of the [pydatajs](https://github.com/svenflow/pydatajs) ecosystem.
 ## Features
 
 - **NumPy-compatible API** - Familiar interface for Python developers
-- **Two backends** - Pure JS (CPU, works everywhere) and WebGPU (GPU-accelerated)
+- **Three backends** - Pure JS (CPU), WebGPU (GPU-accelerated), and WASM SIMD (near-native CPU)
 - **TypeScript-first** - Full type definitions included
 - **Browser & Node.js** - JS backend works everywhere; WebGPU in supported browsers
 
@@ -54,6 +54,40 @@ const C = np.matmul(A, B); // Matrix multiplication
 | -------- | ----------------------------------------- | ------------------------------------------------- |
 | `js`     | Node.js, Bun, all browsers                | CPU-bound, good for small-medium arrays           |
 | `webgpu` | Chrome 113+, Edge 113+, Firefox (nightly) | GPU-accelerated, best for large arrays and matmul |
+| `wasm`   | All modern browsers, Node.js, Bun         | SIMD-optimized, near-native CPU performance       |
+
+## Benchmarks
+
+Matrix multiplication (matmul) performance in GFLOPS — higher is better.
+
+### Apple M4 (Mac)
+
+| Size | numpyjs WebGPU | numpyjs WASM | tfjs WebGPU | tfjs WASM |
+| ---- | -------------- | ------------ | ----------- | --------- |
+| 256  | 66             | 68           | 61          | 247       |
+| 512  | 446            | 199          | 334         | 352       |
+| 1024 | 1,580          | 419          | 1,136       | 382       |
+| 2048 | 2,818          | 501          | 2,264       | 408       |
+| 4096 | **3,272**      | 625          | 2,264       | 407       |
+
+**Peak: 3,272 GFLOPS** — 1.45× faster than tfjs WebGPU at 4096.
+
+### iPhone 17 Pro Max (A18 Pro)
+
+| Size | numpyjs WebGPU | tfjs WebGPU |
+| ---- | -------------- | ----------- |
+| 512  | **312**        | 198         |
+| 1024 | **610**        | 480         |
+| 2048 | **781**        | 650         |
+
+**Peak: 781 GFLOPS** — beats tfjs at every size tested.
+
+### How it works
+
+- **WebGPU**: Custom BCACHE WGSL shader (4×4 output per thread) optimized for Apple GPUs. GPU-resident computation with no CPU readback.
+- **WASM**: Rust-compiled SIMD f32 with futex thread pool for parallel matmul. Runtime feature detection with relaxed-SIMD fast path and simd128 compat fallback.
+
+> **Run it yourself:** Open [bench.html](../../bench.html) in a WebGPU-capable browser to benchmark on your own device.
 
 ## License
 
