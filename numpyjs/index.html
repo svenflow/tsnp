@@ -947,10 +947,16 @@ footer {
       <h2 class="section-title">Write what you already know</h2>
     </div>
 
-    <div class="comparison-layout">
-      <div class="code-panel">
-        <div class="code-panel-label">Python · NumPy</div>
-        <div class="code-block"><code><span class="kw">import</span> numpy <span class="kw">as</span> np
+    <div style="max-width: var(--content-width);">
+      <!-- Toggle tabs -->
+      <div style="display: flex; gap: 0; margin-bottom: 0;">
+        <button id="tabPython" onclick="switchTab('python')" style="flex: 1; padding: 0.625rem 1rem; font-family: 'IBM Plex Mono', monospace; font-size: var(--text-sm); font-weight: 500; background: var(--code-bg); color: var(--code-fg); border: none; cursor: pointer; letter-spacing: 0.02em; transition: opacity 0.15s;">Python · NumPy</button>
+        <button id="tabJs" onclick="switchTab('js')" style="flex: 1; padding: 0.625rem 1rem; font-family: 'IBM Plex Mono', monospace; font-size: var(--text-sm); font-weight: 500; background: var(--code-bg); color: var(--code-comment); border: none; cursor: pointer; letter-spacing: 0.02em; transition: opacity 0.15s; border-left: 1px solid rgba(255,255,255,0.1);">JavaScript · numpyjs</button>
+      </div>
+
+      <!-- Python panel -->
+      <div id="panelPython">
+        <div class="code-block" style="margin: 0;"><code><span class="kw">import</span> numpy <span class="kw">as</span> np
 
 <span class="cm"># Create arrays</span>
 a <span class="op">=</span> np<span class="p">.</span><span class="fn">array</span><span class="p">([[</span><span class="num">1</span><span class="p">,</span> <span class="num">2</span><span class="p">],</span> <span class="p">[</span><span class="num">3</span><span class="p">,</span> <span class="num">4</span><span class="p">]])</span>
@@ -965,11 +971,9 @@ vals<span class="p">,</span> vecs <span class="op">=</span> np<span class="p">.<
 <span class="fn">print</span><span class="p">(</span>np<span class="p">.</span><span class="fn">std</span><span class="p">(</span>a<span class="p">))</span></code></div>
       </div>
 
-      <div class="comparison-arrow">→</div>
-
-      <div class="code-panel">
-        <div class="code-panel-label">JavaScript · numpyjs</div>
-        <div class="code-block"><code><span class="kw">import</span> <span class="p">{</span> createBackend <span class="p">}</span> <span class="kw">from</span> <span class="str">'numpyjs'</span><span class="p">;</span>
+      <!-- JS panel -->
+      <div id="panelJs" style="display:none;">
+        <div class="code-block" style="margin: 0; position: relative;"><code id="jsCode"><span class="kw">import</span> <span class="p">{</span> createBackend <span class="p">}</span> <span class="kw">from</span> <span class="str">'numpyjs'</span><span class="p">;</span>
 <span class="kw">const</span> np <span class="op">=</span> <span class="kw">await</span> <span class="fn">createBackend</span><span class="p">(</span><span class="str">'js'</span><span class="p">);</span>
 
 <span class="cm">// Create arrays</span>
@@ -981,12 +985,72 @@ vals<span class="p">,</span> vecs <span class="op">=</span> np<span class="p">.<
 <span class="kw">const</span> <span class="p">[</span>vals<span class="p">,</span> vecs<span class="p">]</span> <span class="op">=</span> np<span class="p">.</span><span class="fn">eig</span><span class="p">(</span>a<span class="p">);</span>
 
 <span class="cm">// Statistics</span>
-console<span class="p">.</span><span class="fn">log</span><span class="p">(</span>np<span class="p">.</span><span class="fn">mean</span><span class="p">(</span>a<span class="p">,</span> <span class="num">0</span><span class="p">));</span>
-console<span class="p">.</span><span class="fn">log</span><span class="p">(</span>np<span class="p">.</span><span class="fn">std</span><span class="p">(</span>a<span class="p">));</span></code></div>
+console<span class="p">.</span><span class="fn">log</span><span class="p">(</span><span class="str">'mean:'</span><span class="p">,</span> np<span class="p">.</span><span class="fn">mean</span><span class="p">(</span>a<span class="p">,</span> <span class="num">0</span><span class="p">).</span><span class="fn">tolist</span><span class="p">());</span>
+console<span class="p">.</span><span class="fn">log</span><span class="p">(</span><span class="str">'std:'</span><span class="p">,</span> np<span class="p">.</span><span class="fn">std</span><span class="p">(</span>a<span class="p">));</span></code></div>
+        <div style="display: flex; align-items: center; gap: var(--space-md); margin-top: 0; padding: 0.5rem 1rem; background: var(--code-bg); border-top: 1px solid rgba(255,255,255,0.05);">
+          <button onclick="runSnippet()" id="runBtn2" style="padding: 0.4rem 1rem; background: #16a34a; color: white; border: none; font-family: 'IBM Plex Mono', monospace; font-size: var(--text-xs); font-weight: 500; cursor: pointer; letter-spacing: 0.02em;">Run</button>
+          <span id="snippetStatus" style="font-family: 'IBM Plex Mono', monospace; font-size: var(--text-xs); color: var(--code-comment);"></span>
+        </div>
+        <pre id="snippetOutput" style="display:none; background: #16181e; padding: var(--space-md) var(--space-lg); font-family: 'IBM Plex Mono', monospace; font-size: var(--text-sm); color: var(--code-string); line-height: 1.7; margin: 0; border-top: 1px solid rgba(255,255,255,0.05); max-height: 200px; overflow-y: auto;"></pre>
       </div>
     </div>
   </div>
 </section>
+
+<script>
+function switchTab(tab) {
+  const pyPanel = document.getElementById('panelPython');
+  const jsPanel = document.getElementById('panelJs');
+  const pyTab = document.getElementById('tabPython');
+  const jsTab = document.getElementById('tabJs');
+  if (tab === 'python') {
+    pyPanel.style.display = 'block'; jsPanel.style.display = 'none';
+    pyTab.style.color = 'var(--code-fg)'; jsTab.style.color = 'var(--code-comment)';
+  } else {
+    pyPanel.style.display = 'none'; jsPanel.style.display = 'block';
+    jsTab.style.color = 'var(--code-fg)'; pyTab.style.color = 'var(--code-comment)';
+  }
+}
+
+async function runSnippet() {
+  const btn = document.getElementById('runBtn2');
+  const output = document.getElementById('snippetOutput');
+  const status = document.getElementById('snippetStatus');
+  btn.disabled = true;
+  status.textContent = 'Loading numpyjs...';
+  output.style.display = 'block';
+  output.textContent = '';
+
+  try {
+    const { createBackend } = await import('https://cdn.jsdelivr.net/npm/numpyjs@latest/+esm');
+    status.textContent = 'Running...';
+    const np = await createBackend('js');
+
+    const lines = [];
+    const log = (...args) => lines.push(args.map(a => typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a)).join(' '));
+
+    // Run the snippet
+    const a = np.array([1, 2, 3, 4], [2, 2]);
+    const b = np.eye(2);
+    const c = np.matmul(a, b);
+    const [vals, vecs] = np.eig(a);
+
+    log('a =', np.toString(a));
+    log('b =', np.toString(b));
+    log('matmul(a, b) =', np.toString(c));
+    log('eigenvalues =', vals.tolist());
+    log('mean(a, 0) =', np.mean(a, 0).tolist());
+    log('std(a) =', np.std(a));
+
+    output.textContent = lines.join('\n');
+    status.textContent = 'Done';
+  } catch (e) {
+    output.textContent = 'Error: ' + e.message;
+    status.textContent = 'Failed';
+  }
+  btn.disabled = false;
+}
+</script>
 
 <!-- Backends -->
 <section class="backends" id="backends">
